@@ -26,112 +26,106 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Triton Inference Server Ray Serve Deployment
+# Triton Inference Server Ray Serve 部署
 
-Using the Triton Inference Server In-Process Python API you can
-integrate triton server based models into any Python framework
-including FastAPI and Ray Serve.
+借助 Triton Inference Server 进程内 Python API，你可以把基于 Triton 的模型集成到任意 Python 框架中，包括 FastAPI 和 Ray Serve。
 
-This directory contains an example Triton Inference Server Ray Serve
-deployment based on FastAPI.
+本目录包含一个基于 FastAPI 的 Triton Inference Server Ray Serve 部署示例。
 
-| [Installation](#installation) | [Run Deployment](#run-ray-serve-deployment) | [Send Requests](#send-requests-to-deployment) |
+> 💡 **AI Infra 视角**：这里 Triton 与 Ray Serve 的分工很有代表性：Ray Serve 充当编排层（orchestration layer），负责 HTTP 入口、请求路由和弹性扩缩容；Triton 则是其中的推理引擎，管理模型加载与 GPU 执行。类似的组合还有 Triton + Kubernetes + 服务网格。理解「编排层管弹性、推理引擎管算力」这条职责边界，是设计生产级推理系统的基础。
+
+| [安装](#安装) | [运行部署](#运行-ray-serve-部署) | [发送请求](#向部署发送请求) |
 
 
-## Installation
+## 安装
 
-The stable diffusion pipeline is based on the
-[Popular_Models_Guide/StableDiffusion](../../../Popular_Models_Guide/StableDiffusion)
-tutorial.
+Stable Diffusion 流水线基于 [Popular_Models_Guide/StableDiffusion](../../../Popular_Models_Guide/StableDiffusion) 教程。
 
-### Clone Repository
+### 克隆仓库
 ```bash
 git clone https://github.com/triton-inference-server/tutorials.git
 cd tutorials/Triton_Inference_Server_Python_API
 ```
 
-### Build Tritonserver Image and Stable Diffusion Models
+### 构建 Tritonserver 镜像与 Stable Diffusion 模型
 
-Please note the following command will take many minutes depending on
-your hardware configuration and network connection.
+请注意，以下命令可能需要数分钟甚至更久，具体取决于你的硬件配置和网络连接。
 
 ```bash
 ./build.sh --framework diffusion --build-models
 ```
 
-## Run Ray Serve Deployment
+## 运行 Ray Serve 部署
 
-### Start Container
+### 启动容器
 
-The following command starts a container and volume mounts the current
-directory as `workspace`.
+以下命令会启动一个容器，并把当前目录挂载为 `workspace`。
 
 ```bash
 ./run.sh --framework diffusion
 cd examples/rayserve
 ```
 
-### Start Local Ray Cluster
+### 启动本地 Ray 集群
 
-The following command starts a local Ray cluster. It also starts
-prometheus and grafana instances with default Ray and Ray Serve
-metrics and dashboards enabled.
+以下命令会启动一个本地 Ray 集群，同时启动 Prometheus 和 Grafana 实例，并启用默认的 Ray 与 Ray Serve 指标和仪表盘。
 
 ```
 ./start_ray.sh
 ```
 
-### Run Deployment
+### 运行部署
+
+> 💡 **AI Infra 视角**：`serve run tritonserver_deployment:deployment` 中的 `deployment()` 是这个文件的入口，返回 `TritonDeployment.bind()`——一个尚未实例化的部署对象。Ray Serve 的弹性伸缩（autoscaling）配置同样在 `@serve.deployment` 装饰器中声明：`min_replicas`/`max_replicas` 限定副本范围，`target_ongoing_requests` 决定按在途请求数扩缩容，属于典型的负载驱动型（load-based）弹性策略。
 
 ```bash
 serve run tritonserver_deployment:deployment
 ```
 
-## Send Requests to Deployment
+## 向部署发送请求
 
-The deployment includes two endpoints:
+该部署包含两个端点：
 
 ### `/identity`
 
-The identity endpoint accepts a string and returns the same string.
+identity 端点接收一个字符串并原样返回。
 
-#### Example Request
+#### 示例请求
 ```
 curl --request GET "http://127.0.0.1:8000/identity?string_input=hello_world!"
 ```
 
-#### Example Output
+#### 示例输出
 ```bash
 "hello_world!"
 ```
 
 ### `/generate`
-The generate endpoint accepts a prompt, generates an image based on
-the prompt using stable diffusion, and saves the image to a file.
+generate 端点接收一个提示词（prompt），用 stable diffusion 根据提示词生成图片，并把图片保存到文件。
 
-#### Example Request
+#### 示例请求
 ```
 curl --request GET "http://127.0.0.1:8000/generate?prompt=car,model-t,realistic,4k&filename=/workspace/examples/rayserve/car_sample.jpg"
 ```
 
-#### Example Output
+#### 示例输出
 
 ![car_sample](../../docs/car_sample.jpg)
 
 
-## View Ray and Ray Serve Dashboards
+## 查看 Ray 与 Ray Serve 仪表盘
 
-The Ray and Ray Serve dashboards are hosted on the default port and
-can be used to visualize various metrics:
+Ray 与 Ray Serve 仪表盘托管在默认端口上，可用于可视化各项指标：
+
+> 💡 **AI Infra 视角**：Ray 自带的仪表盘（默认端口 8265）直接暴露推理延迟、副本数、GPU 利用率等指标，并预置 Prometheus/Grafana 支持。对 AI Infra 从业者来说，推理服务上线后的可观测性（observability）与推理本身同等重要——吞吐、延迟分位数、排队长度这些指标，决定了你能否在流量增长时及时扩容，以及在 SLA 违约之前发现问题。
 
 ```
 <IP_ADDRESS>:8265
 ```
 
-## Stop the Ray Serve Cluster
+## 停止 Ray Serve 集群
 
-The following command stops the local Ray cluster and also stops
-prometheus and grafana instances.
+以下命令会停止本地 Ray 集群，同时停止 Prometheus 和 Grafana 实例。
 
 
 ```bash

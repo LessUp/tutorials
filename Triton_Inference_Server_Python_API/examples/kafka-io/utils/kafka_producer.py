@@ -1,3 +1,7 @@
+# ============================================================================
+# Kafka 生产者封装：从共享队列中取出推理结果，序列化后写入指定主题。
+# ============================================================================
+
 import json
 from collections import deque
 from datetime import datetime
@@ -7,6 +11,7 @@ from confluent_kafka.serialization import StringSerializer
 from gcn_kafka import Producer
 
 
+# JSON 编码器：把 numpy 数组转换为 Python list，保证结果可 JSON 序列化
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.ndarray):
@@ -14,6 +19,7 @@ class NumpyEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
 
 
+# Kafka 生产者：持续从消息队列取数据并发送到目标主题
 class KafkaProducer:
     def __init__(self, config: dict, topic: str, message_queue: deque):
         self.config = config
@@ -21,11 +27,14 @@ class KafkaProducer:
         self.message_queue = message_queue
         self.serializer = StringSerializer("utf_8")
 
+    # 启动生产循环
     def send_data(self):
         producer = Producer(self.config)
         self._produce(producer)
 
+    # 核心生产循环：轮询队列，有消息就 produce + flush
     def _produce(self, producer):
+        # 投递结果回调：报告消息发送成功或失败
         def delivery_report(err, msg):
             """
             Reports the failure or success of a message delivery.
@@ -41,8 +50,10 @@ class KafkaProducer:
             )
 
         while True:
+            # 非阻塞触发回调事件（如投递结果回调）
             producer.poll(0.0)
             try:
+                # 队列非空时取出一个推理结果，以当前时间戳为 key 发送
                 if self.message_queue.__len__() > 0:
                     producer.produce(
                         topic=self.topics,
@@ -52,6 +63,7 @@ class KafkaProducer:
                         ),
                         on_delivery=delivery_report,
                     )
+                    # flush 确保消息送达 broker（会阻塞到队列清空）
                     producer.flush()
             except KeyboardInterrupt as e:
                 print(f"Keyboard Interrupt received {e}")

@@ -24,6 +24,11 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+# ============================================================================
+# Ray Serve 示例的压测客户端：通过多进程并发向部署端点发送请求，
+# 统计吞吐（throughput）与平均延迟，也可用 nvidia-smi 记录 GPU 使用情况。
+# ============================================================================
+
 import argparse
 import os
 import subprocess
@@ -37,30 +42,36 @@ from tqdm import tqdm
 file_location = os.path.dirname(os.path.realpath(__file__))
 
 
+# 单个客户端的压测逻辑：连续发送 request_count 次请求，统计每次延迟
 def client(endpoint, request_count, prompt, save_image, index):
     latencies = []
     start = time.time()
     for i in tqdm(range(request_count)):
+        # 可选：把生成的图片保存到本地文件（按客户端序号与请求序号命名）
         if save_image:
             filename = os.path.join(
                 file_location, f"client_{index}_generated_image{i}.jpg"
             )
+            # URL 查询参数中的空格需编码为 %20
             filename_input = "%20".join(f"&filename={filename}".split(" "))
         else:
             filename_input = ""
         prompt_input = "%20".join(prompt.split(" "))
         request_start = time.time()
+        # 向 Ray Serve 部署端点发起同步 HTTP 请求
         requests.get(
             f"http://127.0.0.1:8000/{endpoint}?prompt={prompt_input}{filename_input}",
             timeout=300,
         )
         latencies.append(time.time() - request_start)
+    # 输出该客户端的吞吐与平均延迟
     print(
         f"Client: {index} Throughput: {request_count/(time.time()-start)} Avg. Latency: {np.mean(latencies)}"
     )
 
 
 if __name__ == "__main__":
+    # 命令行参数：客户端数、每客户端请求数、提示词、是否保存图片、是否记录 GPU 状态、端点
     parser = argparse.ArgumentParser()
     parser.add_argument("--clients", type=int, default=1)
     parser.add_argument("--requests", type=int, default=1)
@@ -73,6 +84,7 @@ if __name__ == "__main__":
     parser.add_argument("--launch-nvidia-smi", action="store_true")
     parser.add_argument("--endpoint", type=str, default="generate")
     args = parser.parse_args()
+    # 可选：启动 nvidia-smi dmon 在后台持续记录 GPU 指标到文件
     if args.launch_nvidia_smi:
         nvidia_smi_proc = subprocess.Popen(
             ["nvidia-smi", "dmon", "-f", "nvidia_smi_output.txt"]
@@ -80,6 +92,7 @@ if __name__ == "__main__":
         time.sleep(5)
     procs = []
     start_time = time.time()
+    # 每个客户端启动一个独立进程，并发发起压测
     for i in range(args.clients):
         procs.append(
             Process(
@@ -95,6 +108,7 @@ if __name__ == "__main__":
         )
         procs[-1].start()
 
+    # 等待所有客户端进程结束，汇总计算总吞吐
     for proc in procs:
         proc.join()
     end_time = time.time()
