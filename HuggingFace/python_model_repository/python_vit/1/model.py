@@ -30,21 +30,28 @@ from transformers import ViTImageProcessor, ViTModel
 
 
 class TritonPythonModel:
+    # Triton 加载模型时调用：加载 ViT 图像处理器和 ViT 模型本体（仅执行一次）
     def initialize(self, args):
         self.feature_extractor = ViTImageProcessor.from_pretrained(
             "google/vit-base-patch16-224-in21k"
         )
         self.model = ViTModel.from_pretrained("google/vit-base-patch16-224-in21k")
 
+    # 每个推理请求都会调用：执行预处理 + 模型前向，返回编码后的特征张量
     def execute(self, requests):
         responses = []
         for request in requests:
+            # 按名称从请求中取出输入张量
             inp = pb_utils.get_input_tensor_by_name(request, "image")
+            # 去掉 batch 维度并把 HWC 布局转为 CHW
             input_image = np.squeeze(inp.as_numpy()).transpose((2, 0, 1))
+            # 图像处理器负责归一化、切分 patch 等 ViT 标准预处理
             inputs = self.feature_extractor(images=input_image, return_tensors="pt")
 
+            # 模型前向传播，得到编码器输出
             outputs = self.model(**inputs)
 
+            # 把 last_hidden_state 转为 numpy 并封装成 Triton 响应
             inference_response = pb_utils.InferenceResponse(
                 output_tensors=[
                     pb_utils.Tensor(

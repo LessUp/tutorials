@@ -34,28 +34,29 @@ from tritonclient.utils import *
 
 
 def main(model_name):
+    # 建立与 Triton 服务器的 HTTP 连接（默认端口 8000）
     client = httpclient.InferenceServerClient(url="localhost:8000")
 
-    # Inputs
+    # 从 COCO 数据集下载一张示例图片，转为 FP32 数组并增加 batch 维度
     url = "http://images.cocodataset.org/val2017/000000161642.jpg"
     image = np.asarray(Image.open(requests.get(url, stream=True).raw)).astype(
         np.float32
     )
     image = np.expand_dims(image, axis=0)
 
-    # Set Inputs
+    # 声明输入张量 "image"（ViT 的原始图片输入）
     input_tensors = [httpclient.InferInput("image", image.shape, datatype="FP32")]
     input_tensors[0].set_data_from_numpy(image)
 
-    # Set outputs
+    # 声明输出张量 "last_hidden_state"（ViT 编码器最后一层的输出）
     outputs = [httpclient.InferRequestedOutput("last_hidden_state")]
 
-    # Query
+    # 向服务器发送推理请求并等待结果
     query_response = client.infer(
         model_name=model_name, inputs=input_tensors, outputs=outputs
     )
 
-    # Output
+    # 打印输出特征张量的形状
     last_hidden_state = query_response.as_numpy("last_hidden_state")
     print(last_hidden_state.shape)
 

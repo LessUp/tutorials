@@ -26,71 +26,57 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Deploying Hugging Face Transformer Models in Triton
+# 在 Triton 中部署 Hugging Face Transformer 模型
 
-The following tutorial demonstrates how to deploy an arbitrary hugging face transformer
-model on the Triton Inference Server using Triton's [Python backend](https://github.com/triton-inference-server/python_backend).
-For the purposes of this example, the following transformer models will be deployed:
+本教程演示如何借助 Triton 的 [Python 后端](https://github.com/triton-inference-server/python_backend)，在 Triton Inference Server 上部署任意的 Hugging Face transformer 模型。本例将部署以下 transformer 模型：
 - [tiiuae/falcon-7b](https://huggingface.co/tiiuae/falcon-7b)
 - [adept/persimmon-8b-base](https://huggingface.co/adept/persimmon-8b-base)
 - [meta-llama/Llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b)
 
-These models were selected because of their popularity and consistent response quality.
-However, this tutorial is also generalizable for any transformer model provided
-sufficient infrastructure.
+选择这些模型是因为它们人气高、生成质量稳定。不过，只要基础设施足够，本教程的方法同样适用于任意 transformer 模型。
 
-*NOTE*: The tutorial is intended to be a reference example only. It may not be tuned for
-optimal performance.
+*注意*：本教程仅作为参考示例，可能未针对性能做过调优。
 
-*NOTE*: Llama 2 models are not specifically mentioned in the steps below, but
-can be run if `tiiuae/falcon-7b` is replaced with `meta-llama/Llama-2-7b-hf`,
-and `falcon7b` folder is replaced by `llama7b` folder.
+*注意*：下面的步骤中不会专门提到 Llama 2 模型，但只要把 `tiiuae/falcon-7b` 换成 `meta-llama/Llama-2-7b-hf`、把 `falcon7b` 文件夹换成 `llama7b` 文件夹，即可运行。
 
-## Step 1: Create a Model Repository
+## 第一步：创建模型仓库
 
-The first step is to create a model repository containing the models we want the Triton
-Inference Server to load and use for inference processing. To accomplish this, create a
-directory called `model_repository` and copy the `falcon7b` model folder into it:
+第一步是创建模型仓库，让 Triton Inference Server 加载其中的模型并进行推理。为此，先创建一个名为 `model_repository` 的目录，把 `falcon7b` 模型文件夹复制进去：
 
 ```
 mkdir -p model_repository
 cp -r falcon7b/ model_repository/
 ```
 
-The `falcon7b/` folder we copied is organized in the way Triton expects and contains
-two important files needed to serve models in Triton:
-- **config.pbtxt** - Outlines the backend to use, model input/output details, and custom
-parameters to use for execution. More information on the full range of model configuration
-properties Triton supports can be found [here](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html).
-- **model.py** - Implements how Triton should handle the model during the initialization,
-execution, and finalization stages. More information regarding python backend usage
-can be found [here](https://github.com/triton-inference-server/python_backend#usage).
+我们复制的 `falcon7b/` 文件夹按照 Triton 约定的方式组织，包含在 Triton 中服务模型所需的两份重要文件：
+- **config.pbtxt** - 声明要使用的后端、模型的输入输出信息，以及执行时的自定义参数。关于 Triton 支持的模型配置属性的完整说明，请参见[这里](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html)。
+- **model.py** - 实现 Triton 在初始化（initialization）、执行（execution）和收尾（finalization）三个阶段应如何处理该模型。关于 Python 后端的更多用法，请参见[这里](https://github.com/triton-inference-server/python_backend#usage)。
 
+> 💡 **AI Infra 视角**：Python 后端允许你用普通 Python 代码（这里是 Hugging Face transformers 的 pipeline）实现完整的推理逻辑，几乎零门槛即可上线任意模型。代价是性能——逐请求的 Python 解释开销和 GIL 限制使其吞吐远低于 TensorRT、ONNX 等专用后端。生产中的常见取舍是：先用 Python 后端快速验证业务，待流量增长后再把核心网络迁移到专用后端，保留 Python 只做前后处理。
 
-## Step 2: Build a Triton Container Image
+## 第二步：构建 Triton 容器镜像
 
-The second step is to create an image that includes all the dependencies necessary
-to deploy hugging face transformer models on the Triton Inference Server. This can be done
-by building an image from the provided Dockerfile:
+第二步是构建一个包含部署 Hugging Face transformer 模型所需全部依赖的镜像。用仓库提供的 Dockerfile 构建即可：
 
 ```
 docker build -t triton_transformer_server .
 ```
 
-## Step 3: Launch the Triton Inference Server
+## 第三步：启动 Triton Inference Server
 
-Once the ```triton_transformer_server``` image is created, you can launch the Triton Inference
-Server in a container with the following command:
+`triton_transformer_server` 镜像构建完成后，可以用下面的命令在容器中启动 Triton Inference Server：
 ```bash
 docker run --gpus all -it --rm --net=host --shm-size=1G --ulimit memlock=-1 --ulimit stack=67108864 -v ${PWD}/model_repository:/opt/tritonserver/model_repository triton_transformer_server tritonserver --model-repository=model_repository
 ```
 
-**Note**: For private models like `Llama2`, you need to [request access to the model](https://huggingface.co/meta-llama/Llama-2-7b-hf/tree/main) and add the [access token](https://huggingface.co/settings/tokens) to the docker command `-e PRIVATE_REPO_TOKEN=<hf_your_huggingface_access_token>`.
+**注意**：对于 `Llama2` 这类私有模型，你需要先[申请模型访问权限](https://huggingface.co/meta-llama/Llama-2-7b-hf/tree/main)，再把[访问令牌](https://huggingface.co/settings/tokens)通过 docker 命令的 `-e PRIVATE_REPO_TOKEN=<hf_your_huggingface_access_token>` 传入容器。
 ```bash
 docker run --gpus all -it --rm --net=host --shm-size=1G --ulimit memlock=-1 --ulimit stack=67108864 -e PRIVATE_REPO_TOKEN=<hf_your_huggingface_access_token> -v ${PWD}/model_repository:/opt/tritonserver/model_repository triton_transformer_server tritonserver --model-repository=model_repository
 ```
 
-The server has launched successfully when you see the following outputs in your console:
+> 💡 **AI Infra 视角**：服务器启动时会把整个模型加载进显存——以 falcon-7b 为例，7B 参数用 FP16 存储约需 14GB 显存，因此至少要 A100 40GB 或两张 24GB 显卡才能容下模型权重加上推理时的 KV 缓存。启动命令中的 `--shm-size=1G` 与 `--ulimit memlock=-1` 也不是可有可无：Python 后端通过共享内存（shared memory）在进程间传递张量数据，memlock 限制解除后则允许模型权重锁定在内存中，避免被换页拖慢推理。
+
+看到控制台出现以下输出时，说明服务器已成功启动：
 
 ```
 I0922 23:28:40.351809 1 grpc_server.cc:2451] Started GRPCInferenceService at 0.0.0.0:8001
@@ -98,14 +84,14 @@ I0922 23:28:40.352017 1 http_server.cc:3558] Started HTTPService at 0.0.0.0:8000
 I0922 23:28:40.395611 1 http_server.cc:187] Started Metrics Service at 0.0.0.0:8002
 ```
 
-## Step 4: Query the Server
+## 第四步：查询服务器
 
-Now we can query the server using curl, specifying the server address and input details:
+现在可以用 curl 查询服务器，指定服务器地址和输入内容：
 
 ```bash
 curl -X POST localhost:8000/v2/models/falcon7b/infer -d '{"inputs": [{"name":"text_input","datatype":"BYTES","shape":[1],"data":["I am going"]}]}'
 ```
-In our testing, the server returned the following result (formatted for legibility):
+在我们的测试中，服务器返回了如下结果（为便于阅读已格式化）：
 ```json
 {
   "model_name": "falcon7b",
@@ -125,30 +111,26 @@ In our testing, the server returned the following result (formatted for legibili
 }
 ```
 
-## Step 5: Host Multiple Models in Triton
+## 第五步：在 Triton 中托管多个模型
 
-So far in this tutorial, we have only loaded a single model. However, Triton is capable
-of hosting many models, simultaneously. To accomplish this, first ensure you have
-exited the docker container by invoking `Ctrl+C` and waiting for the container to exit.
+到目前为止，本教程只加载了一个模型。其实 Triton 可以同时托管多个模型。要加载更多模型，先按 `Ctrl+C` 退出 docker 容器并等待其退出。
 
-Next copy the remaining model provided into the model repository:
+接下来，把剩下的模型复制进模型仓库：
 ```
 cp -r persimmon8b/ model_repository/
 ```
-*NOTE*: The combined size of these two models is large. If your current hardware cannot
-support hosting both models simultaneously, consider loading a smaller model, such as
-[opt-125m](https://huggingface.co/facebook/opt-125m), by creating a folder for it
-using the templates provided and copying it into `model_repository`.
+*注意*：这两个模型加起来的体积很大。如果你的硬件无法同时支撑两个模型，可以考虑加载更小的模型，例如 [opt-125m](https://huggingface.co/facebook/opt-125m)——用提供的模板为它创建一个文件夹并复制到 `model_repository` 即可。
 
-Again, launch the server by invoking the `docker run` command from above and wait for confirmation
-that the server has launched successfully.
+> 💡 **AI Infra 视角**：多模型共存是 Triton 的核心卖点之一：一套服务同时承载多个模型，通过调度器共享 GPU 资源，避免为每个模型单独起服务造成的显存碎片和 GPU 空转。但"能共存"不等于"应该共存"——每个模型都会占用显存，需要根据模型大小和流量预估做好容量规划，必要时用显存监控（如 `nvidia-smi` 或 Triton 8002 端口的指标）验证预算是否够用。
 
-Query the server making sure to change the host address for each model:
+再次用上面的 `docker run` 命令启动服务器，并等待服务器成功启动的确认信息。
+
+查询服务器时，注意为每个模型修改请求地址：
 ```bash
 curl -X POST localhost:8000/v2/models/falcon7b/infer -d '{"inputs": [{"name":"text_input","datatype":"BYTES","shape":[1],"data":["How can you be"]}]}'
 curl -X POST localhost:8000/v2/models/persimmon8b/infer -d '{"inputs": [{"name":"text_input","datatype":"BYTES","shape":[1],"data":["Where is the nearest"]}]}'
 ```
-In our testing, these queries returned the following parsed results:
+在我们的测试中，这两个查询返回了以下结果：
 ```bash
 # falcon7b
 "How can you be sure that you are getting the best deal on your car"
@@ -156,83 +138,61 @@ In our testing, these queries returned the following parsed results:
 # persimmon8b
 "Where is the nearest starbucks?"
 ```
-Beginning in the 23.10 release, users can now interact with large language models (LLMs) hosted
-by Triton in a simplified fashion by using Triton's generate endpoint:
+从 23.10 版本开始，用户可以通过 Triton 的 generate 端点，以更简化的方式与 Triton 托管的大语言模型（LLM）交互：
 
 ```bash
 curl -X POST localhost:8000/v2/models/falcon7b/generate -d '{"text_input":"How can you be"}'
 ```
-## 'Day Zero' Support
+## 对最新模型的即时支持（'Day Zero' Support）
 
-The latest transformer models may not always be supported in the most recent, official
-release of the `transformers` package. In such a case, you should still be able to
-load these 'bleeding edge' models in Triton by building `transformers` from source.
-This can be done by replacing the transformers install directive in the provided
-Dockerfile with:
+最新的 transformer 模型可能无法立即获得官方 `transformers` 包的支持。这种情况下，你可以通过从源码构建 `transformers`，让这些"前沿"模型也能在 Triton 中加载。做法是把提供的 Dockerfile 中的 transformers 安装指令替换为：
 ```docker
 RUN pip install git+https://github.com/huggingface/transformers.git
 ```
-Using this technique you should be able to serve any transformer models supported by
-hugging face with Triton.
+用这种方法，你应该可以在 Triton 中服务 Hugging Face 支持的任何 transformer 模型。
 
 
-## Next Steps
-The following sections expand on the base tutorial and provide guidance for future sandboxing.
+## 后续步骤
+下面的章节是对基础教程的扩展，为后续试验提供指导。
 
-### Loading Cached Models
-In the previous steps, we downloaded the falcon-7b model from hugging face when we
-launched the Triton server. We can avoid this lengthy download process in subsequent runs
-by loading cached models into Triton. By default, the provided `model.py` files will cache
-the falcon and persimmon models in their respective directories within the `model_repository`
-folder. This is accomplished by setting the `TRANSFORMERS_CACHE` environmental variable.
-To set this environmental variable for an abtitrary model, include the following lines in
-your `model.py` **before** importing the 'transformers' module, making sure to replace
-`{MODEL}` with your target model.
+### 加载缓存模型
+前面的步骤中，我们在启动 Triton 服务器时才从 Hugging Face 下载 falcon-7b 模型。后续运行可以通过加载缓存模型，省去这个耗时的下载过程。默认情况下，提供的 `model.py` 会通过设置 `TRANSFORMERS_CACHE` 环境变量，把 falcon 和 persimmon 模型缓存在 `model_repository` 文件夹中各自的目录里。要为任意模型设置该环境变量，请在 `model.py` 中 **导入 'transformers' 模块之前** 加入下面几行，并把 `{MODEL}` 替换为目标模型。
 
 ```python
 import os
 os.environ['TRANSFORMERS_CACHE'] = '/opt/tritonserver/model_repository/{MODEL}/hf_cache'
 ```
 
-Alternatively, if your system has already cached a hugging face model you wish to deploy in Triton,
-you can mount it to the Triton container by adding the following mount option to the `docker run`
-command from earlier (making sure to replace `${HOME}` with the path to your associated username's home directory):
+另外，如果你的系统已经缓存了要部署到 Triton 的 Hugging Face 模型，可以在之前的 `docker run` 命令中加上下面的挂载选项，把它挂载进 Triton 容器（把 `${HOME}` 替换为你用户的主目录路径）：
 
 ```bash
-# Option to mount a specific cached model (falcon-7b in this case)
+# 挂载某个特定缓存模型的选项（这里以 falcon-7b 为例）
 -v ${HOME}/.cache/huggingface/hub/models--tiiuae--falcon-7b:/root/.cache/huggingface/hub/models--tiiuae--falcon-7b
 
-# Option to mount all cached models on the host system
+# 挂载宿主机上所有缓存模型的选项
 -v ${HOME}/.cache/huggingface:/root/.cache/huggingface
 ```
 
-### Triton Tool Ecosystem
-Deploying models in Triton also comes with the benefit of access to a fully-supported suite
-of deployment analyzers to help you better understand and tailor your systems to fit your
-needs. Triton currently has two options for deployment analysis:
-- [Performance Analyzer](https://docs.nvidia.com/deeplearning/triton-inference-server/archives/triton-inference-server-2310/user-guide/docs/user_guide/perf_analyzer.html): An inference performance optimizer.
-- [Model Analyzer](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_analyzer.html) A GPU memory and compute utilization optimizer.
+### Triton 工具生态
+在 Triton 中部署模型，还能获得一套功能完整的部署分析工具，帮助你更好地了解和调优系统。Triton 目前提供两种部署分析工具：
+- [Performance Analyzer](https://docs.nvidia.com/deeplearning/triton-inference-server/archives/triton-inference-server-2310/user-guide/docs/user_guide/perf_analyzer.html)：推理性能优化器。
+- [Model Analyzer](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_analyzer.html)：GPU 显存和计算利用率优化器。
 
 #### Performance Analyzer
-To use the performance analyzer, please remove the persimmon8b model from `model_repository` and restart
-the Triton server using the `docker run` command from above.
+使用性能分析器前，请先从 `model_repository` 中移除 persimmon8b 模型，再用上面的 `docker run` 命令重启 Triton 服务器。
 
-Once Triton launches successfully, start a Triton SDK container by running the following in a separate window:
+Triton 成功启动后，在另一个窗口中启动 Triton SDK 容器：
 
 ```bash
 docker run -it --net=host nvcr.io/nvidia/tritonserver:26.07-py3-sdk bash
 ```
-This container comes with all of Triton's deployment analyzers pre-installed, meaning
-we can simply enter the following to get feedback on our model's inference performance:
+这个容器预装了 Triton 的全部部署分析工具，因此只需输入下面的命令，就能得到模型推理性能的反馈：
 
 ```bash
 perf_analyzer -m falcon7b --collect-metrics
 ```
 
-This command should run quickly and profile the performance of our falcon7b model.
-As the analyzer runs, it will output useful metrics such as latency percentiles,
-latency by stage of inference, and successful request count. A subset of the output
-data is shown below:
+这个命令运行得很快，会对我们的 falcon7b 模型进行性能剖析。分析器运行时会输出延迟百分位、推理各阶段延迟、成功请求数等有用指标。部分输出数据如下：
 
 ```bash
 #Avg request latency
@@ -245,24 +205,21 @@ GPU-57c7b00e-ca04-3876-91e2-c1eae40a0733 : 66.0556%
 Concurrency: 1, throughput: 21.3841 infer/sec, latency 46783 usec
 ```
 
-These metrics tell us that we are not fully utilizing our hardware and that our
-throughput is low. We can immediately improve these results by batching our requests
-instead of computing inferences one at a time. The `model.py` file for the falcon model
-is already configured to handle batched requests. Enabling batching in Triton is as simple
-as adding the following to falcon's `config.pbtxt` file:
+> 💡 **AI Infra 视角**：注意上面的耗时分解——`queue` 25 usec 表示请求在调度队列里的等待时间，`compute infer` 46161 usec 才是真正的 GPU 计算时间：单请求串行执行时 GPU 大部分时间在等待，利用率只有 66%。提升 GPU 利用率的标准手段就是批处理（batching）：把多个请求合并成一批一次计算，分摊启动开销，但这会牺牲单请求延迟，吞吐与延迟之间的平衡正是推理服务调优的核心课题。
+
+这些指标说明我们还没有充分利用硬件，吞吐也很低。把逐个推理改为批量处理，可以立刻改善结果。falcon 模型的 `model.py` 已支持处理批量请求。在 Triton 中启用批处理很简单，只需在 falcon 的 `config.pbtxt` 中添加以下内容：
 
 ```
 dynamic_batching { }
 max_batch_size: 8
 ```
-The integer corresponding to the `max_batch_size`, can be any of your choosing, however,
-for this example, we select 8. Now let's re-run the perf_analyzer with increasing levels
-of concurrency and see how it impacts GPU utilization and throughput by executing:
+
+`max_batch_size` 对应的整数可以随意选择，本示例中我们选了 8。现在用不断增大的并发度重新运行 perf_analyzer，看看它如何影响 GPU 利用率和吞吐：
+
 ```bash
 perf_analyzer -m falcon7b --collect-metrics --concurrency-range=2:16:2
 ```
-After executing for a few minutes, the performance analyzer should return
-results similar to these (depending on hardware):
+运行几分钟后，性能分析器应返回类似下面的结果（取决于硬件）：
 ```bash
 # Concurrency = 4
 GPU-57c7b00e-ca04-3876-91e2-c1eae40a0733 : 74.1111%
@@ -276,54 +233,35 @@ Throughput: 46.2105 infer/sec, latency 172920 usec
 GPU-57c7b00e-ca04-3876-91e2-c1eae40a0733 : 90.5556%
 Throughput: 53.6549 infer/sec, latency 299178 usec
 ```
-Using the performance analyzer we were able to quickly profile different model configurations
-to obtain better throughput and hardware utilization. In this case, we were able to
-identify a configuration that nearly triples our throughput and increases GPU
-utilization by ~24% in less than 5 minutes.
 
-This is a single, simple use case for the performance analyzer. For more information and
-a more complete list of performance analyzer parameters and use cases, please see
-[this](https://docs.nvidia.com/deeplearning/triton-inference-server/archives/triton-inference-server-2310/user-guide/docs/user_guide/perf_analyzer.html)
-guide.
+借助性能分析器，我们快速剖析了不同的模型配置，获得了更好的吞吐和硬件利用率。在这个例子中，我们用了不到 5 分钟就找到了一份配置：吞吐提升近两倍，GPU 利用率提高约 24%。
 
-For more information regarding dynamic batching in Triton, please see [this](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html#dynamic-batcher)
-guide.
+这只是性能分析器的一个简单用例。关于性能分析器参数的更完整说明和更多用例，请参见[这份](https://docs.nvidia.com/deeplearning/triton-inference-server/archives/triton-inference-server-2310/user-guide/docs/user_guide/perf_analyzer.html)指南。
+
+关于 Triton 动态批处理（dynamic batching）的更多信息，请参见[这份](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html#dynamic-batcher)指南。
 
 #### Model Analyzer
 
-In the performance analyzer section, we used intuition to increase our throughput by changing
-a subset of variables and measuring the difference in performance. However, we only changed
-a few variables across a wide search space.
+在性能分析器一节中，我们靠直觉修改了一小部分变量并对比性能差异来提升吞吐。但面对广阔的搜索空间，我们只试了几个变量。
 
-To sweep this parameter space in a more robust fashion, we can use Triton's model analyzer, which
-not only sweeps a large spectrum of configuration parameters, but also generates visual reports
-to analyze post-execution.
+要更系统地扫描参数空间，可以用 Triton 的 model analyzer——它不仅会扫描大量配置参数组合，还会生成可视化报告，供执行后分析。
 
-To use the model analyzer, please terminate your Triton server by invoking `Ctrl+C` and relaunching
-it with the following command (ensuring the dynamic_batching parameters from above have been added
-to the falcon model's config.pbtxt):
+使用 model analyzer 前，请先按 `Ctrl+C` 终止 Triton 服务器，再用下面的命令重新启动（确保 falcon 模型的 config.pbtxt 中已加入上面的 dynamic_batching 参数）：
 ```bash
 docker run --gpus all -it --rm --net=host --shm-size=1G --ulimit memlock=-1 --ulimit stack=67108864 -v ${PWD}/model_repository:/opt/tritonserver/model_repository triton_transformer_server
 ```
 
-Next, to get the most accurate GPU metrics from the model analyzer, we will install and launch it from
-our local server container. To accomplish this, first install the model analyzer:
+接下来，为了从 model analyzer 获得最准确的 GPU 指标，我们将在本地服务器容器中安装并启动它。首先安装 model analyzer：
 ```bash
 pip3 install triton-model-analyzer
 ```
 
-Once the model analyzer installs successfully, enter the following command (modifying the instance
-count to something lower for your GPU, if necessary):
+安装成功后，输入下面的命令（如有必要，可把实例数调低以适配你的 GPU）：
 ```bash
 model-analyzer profile -m /opt/tritonserver/model_repository/ --profile-models falcon7b --run-config-search-max-instance-count=3 --run-config-search-min-model-batch-size=8
 ```
-This tool will take longer to execute than the performance analyzer example (~40 minutes).
-If this execution time is too long, you can also run the analyzer with the
-`--run-config-search-mode quick` option. In our experimentation, enabling the quick search option
-yielded fewer results but took half the time. Regardless, once the model analyzer is complete,
-it will provide you a full summary relating to throughput, latency, and hardware utilization
-in multiple formats. A snippet from the summary report produced by the model analyzer for
-our run is ranked by performance and shown below:
+
+这个工具的执行时间会比性能分析器示例长得多（约 40 分钟）。如果执行时间太长，也可以加上 `--run-config-search-mode quick` 选项运行。在我们的实验中，快速搜索模式产出的结果更少，但耗时减半。无论如何，model analyzer 完成后会以多种格式提供吞吐、延迟和硬件利用率的完整汇总。下面摘录了我们的运行结果，按性能排序：
 
 | Model Config Name | Max Batch Size | Dynamic Batching | Total Instance Count | p99 Latency (ms) | Throughput (infer/sec) | Max GPU Memory Usage (MB) | Average GPU Utilization (%) |
 | :---: | :----: | :---: | :----: | :---: | :----:   | :---: | :---: |
@@ -332,10 +270,9 @@ our run is ranked by performance and shown below:
 | falcon7b_config_4 | 16 | Enabled | 2:GPU | 7601.437 | 63.9454 | 31331 | 100.0 |
 | falcon7b_config_default | 8 | Enabled | 1:GPU | 4151.873 | 63.9384 | 16449 | 89.3 |
 
-We can examine the performance of any of these configurations with more granularity by viewing
-their detailed reports. This subset of reports focuses on a single configuration's latency
-and concurrency metrics as they relate to throughput and hardware utilization. A snippet from
-the top performing configuration for our tests is shown below (abridged for brevity):
+> 💡 **AI Infra 视角**：注意对比 `falcon7b_config_7`（3 个实例、p99 延迟 1412ms、吞吐 71.9/s）与 `falcon7b_config_4`（2 个实例、p99 延迟 7601ms、吞吐 63.9/s）——多实例并不必然带来低延迟，因为 GPU 算力被更多实例切分后单请求排队更久。模型实例数（instance count）、批大小与延迟之间没有简单的单调关系，这正是 Model Analyzer 存在的意义：它自动搜索配置空间，找到符合你 SLO 的目标函数最优解，省去手工试错。
+
+我们可以通过查看详细报告，更细粒度地审视其中任一配置的性能。这类报告聚焦于单个配置在吞吐和硬件利用率下的延迟与并发指标。下面摘录了我们测试中表现最优的配置（为简洁起见已删减）：
 
 | Request Concurrency | p99 Latency (ms) | Client Response Wait (ms) | Server Queue (ms) | Server Compute Input (ms) | Server Compute Infer (ms) | Throughput (infer/sec) | Max GPU Memory Usage (MB) | Average GPU Utilization (%) |
 | :---: | :----: | :---: | :----: | :---: | :----:   | :---: | :---: | :---: |
@@ -347,23 +284,14 @@ the top performing configuration for our tests is shown below (abridged for brev
 | | | | | ... | | | | |
 | 1 | 67.12 | 49.707 | 0.049 | 0.024 | 49.121 | 20.0993 | 46207.598592 | 54.9 |
 
-Similarly, this is a single use case for the model analyzer. For more information and a more complete list
-of model analyzer parameters and run options, please see [this](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_analyzer.html) guide.
+同样，这只是 model analyzer 的一个用例。关于 model analyzer 参数和运行选项的更完整说明，请参见[这份](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_analyzer.html)指南。
 
-*Please note that both the performance and model analyzer experiments were conducted
-on a system with an Intel i9 and NVIDIA A6000 GPU. Your results may vary depending on
-you hardware.*
+*请注意，性能和模型分析实验均在配备 Intel i9 CPU 和 NVIDIA A6000 GPU 的系统上完成。实际结果可能因硬件不同而有所差异。*
 
-## Customization
+## 自定义
 
-The `model.py` files have been kept minimal in order to maximize generalizability. Should you wish
-to modify the behavior of the transformer models, such as increasing the number of generated sequences
-to return, be sure to modify the corresponding `config.pbtxt` and `model.py` files and copy them
-into the `model_repository`.
+`model.py` 文件特意保持精简，以最大化通用性。如果你想修改 transformer 模型的行为，例如增加返回的生成序列数量，请务必修改对应的 `config.pbtxt` 和 `model.py` 文件，再复制进 `model_repository`。
 
-The transformers used in this tutorial were all suited for text-generation tasks, however, this
-is not a limitation. The principles of this tutorial can be applied to serve models suited for
-any other transformer task.
+本教程使用的 transformers 模型都适合文本生成任务，但这并非限制。本教程的原理同样适用于服务任何其他 transformer 任务的模型。
 
-Triton offers a rich variety of available server configuration options not mentioned in this tutorial.
-For a more custom deployment, please see our [model configuration guide](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html) to see how the scope of this tutorial can be expanded to fit your needs.
+Triton 还提供了本教程未提及的大量服务器配置选项。如需更定制化的部署，请参考我们的[模型配置指南](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/model_configuration.html)，了解如何在本教程的基础上扩展以满足你的需求。

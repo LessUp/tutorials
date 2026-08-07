@@ -27,6 +27,7 @@
 import tensorflow as tf
 from tensorflow.keras.applications.resnet50 import ResNet50
 
-# Load model0
+# 加载 ImageNet 预训练的 ResNet50 模型
 model = ResNet50(weights="imagenet")
+# 以 SavedModel 格式保存（含计算图和权重），供 Triton 的 TensorFlow 后端加载
 model.save("resnet50_saved_model")

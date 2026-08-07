@@ -25,6 +25,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 import os
 
+# 在导入 transformers 之前设置模型缓存目录，避免每次启动都重新下载模型
 os.environ["TRANSFORMERS_CACHE"] = "/opt/tritonserver/model_repository/llama7b/hf-cache"
 
 import json
@@ -36,24 +37,27 @@ import triton_python_backend_utils as pb_utils
 
 
 class TritonPythonModel:
+    # 初始化：读取模型配置参数，用访问令牌加载 Llama2 及分词器，构建文本生成 pipeline
     def initialize(self, args):
         self.logger = pb_utils.Logger
+        # 解析 model config 中的自定义参数（huggingface_model、max_output_length）
         self.model_config = json.loads(args["model_config"])
         self.model_params = self.model_config.get("parameters", {})
         default_hf_model = "meta-llama/Llama-2-7b-hf"
         private_repo_token = ""
         default_max_gen_length = "15"
-        # Check for user-specified model name in model config parameters
+        # 从配置中读取用户指定的 HuggingFace 模型名，未指定时使用默认模型
         hf_model = self.model_params.get("huggingface_model", {}).get(
             "string_value", default_hf_model
         )
+        # Llama2 是受限模型，必须提供 HuggingFace 访问令牌；未设置环境变量时给出提示
         if "PRIVATE_REPO_TOKEN" not in os.environ:
             print(
                 "envvar PRIVATE_REPO_TOKEN should be specified if running a restricted model like Llama2"
             )
         private_repo_token = os.environ["PRIVATE_REPO_TOKEN"]
 
-        # Check for user-specified max length in model config parameters
+        # 从配置中读取最大生成长度，未指定时默认 15 个 token
         self.max_output_length = int(
             self.model_params.get("max_output_length", {}).get(
                 "string_value", default_max_gen_length
@@ -62,11 +66,12 @@ class TritonPythonModel:
 
         self.logger.log_info(f"Max output length: {self.max_output_length}")
         self.logger.log_info(f"Loading HuggingFace model: {hf_model}...")
-        # Assume tokenizer available for same model
+        # 加载与模型配套的分词器（下载私有模型需携带访问令牌）
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
             hf_model, token=private_repo_token
         )
 
+        # 构建文本生成 pipeline：FP16 精度，token 参数用于鉴权下载私有模型
         self.pipeline = transformers.pipeline(
             "text-generation",
             model=hf_model,
@@ -76,10 +81,11 @@ class TritonPythonModel:
             token=private_repo_token,
         )
 
+    # 每个推理请求都会调用：取出输入文本，生成并返回文本响应
     def execute(self, requests):
         responses = []
         for request in requests:
-            # Assume input named "prompt", specified in autocomplete above
+            # 按名称从请求中取出输入张量（text_input）
             input_tensor = pb_utils.get_input_tensor_by_name(request, "text_input")
             prompt = input_tensor.as_numpy()[0].decode("utf-8")
 
@@ -88,6 +94,7 @@ class TritonPythonModel:
 
         return responses
 
+    # 核心生成逻辑：用采样方式（top_k=10）生成单个序列，封装为 Triton 响应
     def generate(self, prompt):
         sequences = self.pipeline(
             prompt,
@@ -105,10 +112,12 @@ class TritonPythonModel:
             self.logger.log_info(f"Sequence {i+1}: {text}")
             texts.append(text)
 
+        # 以 object 数组承载文本字符串，封装为 Triton 输出张量
         tensor = pb_utils.Tensor("text_output", np.array(texts, dtype=np.object_))
         output_tensors.append(tensor)
         response = pb_utils.InferenceResponse(output_tensors=output_tensors)
         return response
 
+    # Triton 卸载模型时调用：清理资源
     def finalize(self):
         print("Cleaning up...")

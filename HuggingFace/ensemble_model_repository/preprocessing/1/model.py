@@ -30,20 +30,26 @@ from transformers import ViTFeatureExtractor
 
 
 class TritonPythonModel:
+    # Triton 加载模型时调用：加载 ViT 特征提取器（图片预处理组件）
     def initialize(self, args):
         self.feature_extractor = ViTFeatureExtractor.from_pretrained(
             "google/vit-base-patch16-224-in21k"
         )
 
+    # 每个推理请求都会调用：完成 ViT 的图片预处理，输出供 ONNX 模型使用的 pixel_values
     def execute(self, requests):
         responses = []
         for request in requests:
+            # 按名称从请求中取出输入张量
             inp = pb_utils.get_input_tensor_by_name(request, "image")
+            # 去掉 batch 维度并把 HWC 布局转为 CHW，符合 ViT 的输入要求
             input_image = np.squeeze(inp.as_numpy()).transpose((2, 0, 1))
 
+            # 用特征提取器处理图片，得到模型输入张量 pixel_values
             inputs = self.feature_extractor(images=input_image, return_tensors="pt")
             pixel_values = inputs["pixel_values"].numpy()
 
+            # 用 pb_utils.Tensor 封装输出，构造 Triton 响应对象
             inference_response = pb_utils.InferenceResponse(
                 output_tensors=[
                     pb_utils.Tensor(

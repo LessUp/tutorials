@@ -31,9 +31,10 @@ from torchvision import transforms
 from tritonclient.utils import triton_to_np_dtype
 
 
-# preprocessing function
+# 预处理函数：读取图片并转换为 224x224 归一化张量，额外增加 batch 维度
 def rn50_preprocess(img_path="img1.jpg"):
     img = Image.open(img_path)
+    # 构建预处理流水线：缩放 → 中心裁剪 → 转张量 → 按 ImageNet 均值/方差归一化
     preprocess = transforms.Compose(
         [
             transforms.Resize(256),
@@ -47,16 +48,18 @@ def rn50_preprocess(img_path="img1.jpg"):
 
 transformed_img = rn50_preprocess()
 
-# Setting up client
+# 建立与 Triton 服务器的 HTTP 连接（默认端口 8000）
 client = httpclient.InferenceServerClient(url="localhost:8000")
 
+# 声明输入输出张量：名称须与 DenseNet 模型（data_0、fc6_1）保持一致
 inputs = httpclient.InferInput("data_0", transformed_img.shape, datatype="FP32")
 inputs.set_data_from_numpy(transformed_img, binary_data=True)
 
 outputs = httpclient.InferRequestedOutput("fc6_1", binary_data=True, class_count=1000)
 
-# Querying the server
+# 向服务器发送推理请求并等待结果
 results = client.infer(model_name="densenet_onnx", inputs=[inputs], outputs=[outputs])
 inference_output = results.as_numpy("fc6_1").astype(str)
 
+# 去掉单例维度后打印前 5 个类别的置信度与索引
 print(np.squeeze(inference_output)[:5])

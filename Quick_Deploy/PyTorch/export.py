@@ -27,6 +27,9 @@
 import torch
 from torchvision import models
 
+# 加载 ImageNet 预训练的 ResNet50，切换为评估模式并搬上 GPU
 model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1).eval().to("cuda")
+# 用随机输入对模型做追踪（trace）得到静态计算图，输入形状固定为 (1,3,224,224)
 traced_model = torch.jit.trace(model, torch.randn(1, 3, 224, 224).to("cuda"))
+# 保存为 torchscript 格式，供 Triton 的 PyTorch 后端加载
 torch.jit.save(traced_model, "model.pt")
