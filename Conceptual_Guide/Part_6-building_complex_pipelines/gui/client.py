@@ -32,13 +32,16 @@ import tritonclient.grpc as grpcclient
 from PIL import Image
 from tritonclient.utils import np_to_triton_dtype
 
+# Gradio 界面客户端：浏览器里输入提示词，调用 Triton 上的 pipeline 模型生成图片
 parser = argparse.ArgumentParser()
 parser.add_argument("--triton_url", default="localhost:8001")
 args = parser.parse_args()
 
+# 通过 gRPC 连接 Triton（默认端口 8001）
 client = grpcclient.InferenceServerClient(url=f"{args.triton_url}")
 
 
+# 生成回调：把提示词发给 Triton，返回生成的图片
 def generate(prompt):
     text_obj = np.array([prompt], dtype="object").reshape((-1, 1))
     input_text = grpcclient.InferInput(
@@ -48,6 +51,7 @@ def generate(prompt):
 
     output_img = grpcclient.InferRequestedOutput("generated_image")
 
+    # 调用 pipeline 模型：一次请求完成整条 Stable Diffusion 流水线
     response = client.infer(
         model_name="pipeline", inputs=[input_text], outputs=[output_img]
     )
@@ -57,6 +61,7 @@ def generate(prompt):
     return im
 
 
+# 定义界面：文本框 + 生成按钮 + 图片输出
 with gr.Blocks() as app:
     prompt = gr.Textbox(label="Prompt")
     submit_btn = gr.Button("Generate")

@@ -28,14 +28,18 @@ import torch
 from diffusers import AutoencoderKL
 from transformers import CLIPTextModel, CLIPTokenizer
 
+# 导出脚本：把 Stable Diffusion 的 VAE 解码器与 CLIP 文本编码器导出为 ONNX
 prompt = "Draw a dog"
+# 加载预训练 VAE（只用于图像解码）
 vae = AutoencoderKL.from_pretrained(
     "CompVis/stable-diffusion-v1-4", subfolder="vae", use_auth_token=True
 )
 
+# 加载 CLIP 文本编码器与分词器
 tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
 text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
 
+# 只保留解码路径：把 forward 替换为 decode，导出为 ONNX
 vae.forward = vae.decode
 torch.onnx.export(
     vae,
@@ -43,6 +47,7 @@ torch.onnx.export(
     "vae.onnx",
     input_names=["latent_sample", "return_dict"],
     output_names=["sample"],
+    # 声明所有维度均为动态维度，便于 Triton 侧按批大小灵活调度
     dynamic_axes={
         "latent_sample": {0: "batch", 1: "channels", 2: "height", 3: "width"},
     },
@@ -50,6 +55,7 @@ torch.onnx.export(
     opset_version=14,
 )
 
+# 对提示词做分词，得到文本编码器的输入
 text_input = tokenizer(
     prompt,
     padding="max_length",
@@ -58,6 +64,7 @@ text_input = tokenizer(
     return_tensors="pt",
 )
 
+# 导出文本编码器：输入 token ids，输出隐藏状态（供后续去噪阶段使用）
 torch.onnx.export(
     text_encoder,
     (text_input.input_ids.to(torch.int32)),

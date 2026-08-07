@@ -27,6 +27,7 @@
 from tqdm import tqdm
 
 
+# 双进度条显示：上下两条分别表示两个并发请求的 token 生成进度
 class Display:
     def __init__(self, max_tokens) -> None:
         self._top = tqdm(position=0, total=max_tokens, miniters=1)

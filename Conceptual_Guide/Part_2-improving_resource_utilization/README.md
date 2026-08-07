@@ -27,43 +27,48 @@
 -->
 
 
-# Dynamic Batching & Concurrent Model Execution
+# 动态批处理与并发模型执行（Dynamic Batching & Concurrent Model Execution）
 
-| Navigate to | [Part 1: Model Deployment](../Part_1-model_deployment/) | [Part 3: Optimizing Triton Configuration](../Part_3-optimizing_triton_configuration/) |
+| 跳转到 | [第 1 部分：模型部署](../Part_1-model_deployment/) | [第 3 部分：优化 Triton 配置](../Part_3-optimizing_triton_configuration/) |
 | ------------ | --------------- | --------------- |
 
-Part-1 of this series introduced the mechanisms to set up a Triton Inference Server. This iteration discusses the concept of dynamic batching and concurrent model execution. These are important features that can be used to reduce latency as well as increase throughput via higher resource utilization.
+本系列的第 1 部分介绍了如何搭建 Triton Inference Server。本部分讨论动态批处理（dynamic batching）和并发模型执行（concurrent model execution）这两个概念。它们是可以用来降低延迟、并通过更高的资源利用率提升吞吐的重要特性。
 
-## What is Dynamic Batching?
+## 什么是动态批处理？
 
-Dynamic batching, in reference to the Triton Inference Server, refers to the functionality which allows the combining of one or more inference requests into a single batch (which has to be created dynamically) to maximize throughput.
+就 Triton Inference Server 而言，动态批处理指的是把一条或多条推理请求合并成单个批次（需要动态创建）以最大化吞吐的功能。
 
-Dynamic batching can be enabled and configured on per model basis by specifying selections in the model's `config.pbtxt`. Dynamic Batching can be enabled with its default settings by adding the following to the `config.pbtxt` file:
+动态批处理可以按模型启用和配置，方法是在该模型的 `config.pbtxt` 中指定相应设置。在 `config.pbtxt` 中加入以下内容即可用默认配置启用动态批处理：
+
 ```
 dynamic_batching { }
 ```
-While Triton batches these incoming requests without any delay, users can choose to allocate a limited delay for the scheduler to collect more inference requests to be used by the dynamic batcher.
+
+虽然 Triton 会在没有任何延迟的情况下对入站请求进行批处理，但用户也可以为调度器分配一个有限时间的延迟，让它收集更多推理请求供动态批处理器使用。
 
 ```
 dynamic_batching {
     max_queue_delay_microseconds: 100
 }
 ```
-Let's discuss a sample scenario(refer the diagram below). Say there are 5 inference requests, `A`, `B`, `C`, `D`, and `E`, with batch sizes of `4`, `2`, `2`, `6`, and `2` respectively. Each batch requires time `X ms` to be processed by the model. The maximum batch size supported by the model is `8`. `A` and `C` arrive at time `T = 0`, `B` arrives at time `T = X/3`, and `D` and `E` arrive at time `T = 2*X/3`.
+
+我们来讨论一个示例场景（参考下图）。假设有 5 条推理请求 `A`、`B`、`C`、`D` 和 `E`，它们的批大小分别是 `4`、`2`、`2`、`6` 和 `2`。每个批次被模型处理需要 `X ms`。模型支持的最大批大小是 `8`。`A` 和 `C` 在 `T = 0` 时到达，`B` 在 `T = X/3` 时到达，`D` 和 `E` 在 `T = 2*X/3` 时到达。
 
 ![Dynamic Batching Sample](./img/dynamic_batching.PNG)
 
-In the case where no dynamic batching is used, all requests are processed sequentially, which means that it takes `5X ms` to process all the requests. This process is quite wasteful as each batch processing could have processed more batches than it did in sequential execution.
+在不使用动态批处理的情况下，所有请求串行处理，处理完所有请求需要 `5X ms`。这个过程相当浪费，因为每次批次处理本可以处理比串行执行时更多的批次。
 
-Using Dynamic batching in this case leads to more efficient packing of requests into the GPU memory resulting in a considerably faster `3X ms`. It also reduces the latency of responses as more queries can be processed in fewer cycles. If the use of `delay` is considered, `A`, `B`, `C` and `D`, `E` can be batched together to get even better utilization of resources.
+而使用动态批处理可以把请求更高效地打包进 GPU 内存，处理时间显著缩短到 `3X ms`。同时它也降低了响应延迟，因为更少的处理周期内可以完成更多查询。如果考虑使用 `delay`，`A`、`B`、`C` 可以合批，`D`、`E` 也可以合批，从而获得更好的资源利用率。
 
-**Note:** The above is an extreme version of an ideal case scenario. In practice, not all elements of execution can be perfectly parallelized, resulting in longer execution time for larger batches.
+**注意（Note）：** 以上是理想情况的极端版本。实际上，执行过程中的要素无法被完全并行化，批越大执行时间越长。
 
-As observed from the above, the use of Dynamic Batching can lead to improvements in both latency and throughput while serving models. This batching feature is mainly focused on providing a solution for stateless models(models which do not maintain a state between execution, like object detection models). Triton's [sequence batcher](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/batcher.md#sequence-batcher) can be used to manage multiple inference requests for stateful models. For more information and configurations regarding dynamic batching, refer to the Triton Inference Server [documentation](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/batcher.md#dynamic-batcher).
+> 💡 **AI Infra 视角**：动态批处理是 GPU 利用率的第一杠杆。GPU 的算力高度依赖"批大小"——批太小，SM（流式多处理器）喂不满数据，算力就闲置了。在线推理场景请求到达是稀疏且不齐整的，动态批处理就是把这些零散请求攒成整齐的 batch。实践中要平衡 `max_queue_delay_microseconds`：延迟等太久会伤害 p99 延迟，等太短又凑不齐批。这就是典型的"延迟 vs 吞吐"权衡。
 
-## Concurrent model execution
+从上面的分析可以看出，在服务模型时使用动态批处理可以同时改善延迟和吞吐。这个批处理特性主要面向无状态模型（stateless models，即执行之间不维持状态的模型，如目标检测模型）。Triton 的[序列批处理器（sequence batcher）](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/batcher.md#sequence-batcher)可以用来管理有状态模型的多个推理请求。关于动态批处理的更多信息和配置，请参考 Triton Inference Server [文档](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/batcher.md#dynamic-batcher)。
 
-The Triton Inference Server can spin up multiple instances of the same model, which can process queries in parallel. Triton can spawn instances on the same device (GPU), or a different device on the same node as per the user's specifications. This customizability is especially useful when considering ensembles that have models with different throughputs. Multiple copies of heavier models can be spawned on a separate GPU to allow for more parallel processing. This is enabled via the use of `instance groups` option in a model's configuration.
+## 并发模型执行（Concurrent model execution）
+
+Triton Inference Server 可以启动同一模型的多个实例，并行处理查询。Triton 可以在同一设备（GPU）上或同一节点的不同设备上按用户规格生成实例。这种可定制性在考虑由吞吐量不同的模型组成的集成（ensemble）时尤其有用。可以在单独的 GPU 上生成多个较重模型的副本，以支持更多并行处理。这是通过模型配置中的 `instance groups` 选项启用的。
 
 ```
 instance_group [
@@ -75,27 +80,32 @@ instance_group [
 ]
 ```
 
-Let's take the previous example and discuss the effect of adding multiple models for parallel execution. In this example, instead of having a single model process five queries, two models are spawned. ![Multiple Model Instances](./img/multi_instance.PNG)
+我们来沿用之前的例子，讨论加入多个模型并行执行的效果。在这个例子中，不再是单个模型处理 5 个查询，而是生成两个模型实例。![Multiple Model Instances](./img/multi_instance.PNG)
 
-For a "no dynamic batching" case, as there are two models to execute, the queries are distributed equally. Users can also add [priorities](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/model_configuration.md#priority) to prioritize or de-prioritize any specific instance group.
+在"无动态批处理"的情况下，由于有两个模型实例，查询被平均分配。用户还可以添加[优先级（priorities）](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/model_configuration.md#priority)来提升或降低某个实例组的优先级。
 
-When considering the case of multiple instances with dynamic batches enabled, the following happens. Owing to the availability of another instance, query `B` which arrives with some delay can be executed using the second instance. With some delay allocated, instance 1 gets filled and launched by time `T = X/2` and since queries `D` and `E` stack up to fill up to the maximum batch size, the second model can start inference without any delay.
+再考虑多个实例配合动态批处理的情况，会发生下面这些事情。由于有第二个实例可用，稍晚到达的查询 `B` 可以由第二个实例执行。分配了一定延迟后，实例 1 在 `T = X/2` 时被填满并启动，而由于查询 `D` 和 `E` 堆叠起来填满了最大批大小，第二个模型可以无延迟地开始推理。
 
-The key takeaway from the above examples is that the Triton Inference Server provides flexibility with respect to policies related to creating more efficient batching, thus enabling better resource utilization, resulting in reduced latency and increased throughput.
+> 💡 **AI Infra 视角**：instance group 是 Triton 里"用显存换并行度"的手段。单个模型实例常常喂不饱 GPU（尤其小模型），多实例让计算和显存更充分地利用。但注意：实例数开太多会让每个实例的批变小，可能适得其反。更关键的是它会按实例数翻倍占用显存——对 LLM 这种显存大户，多实例要谨慎，这也是为什么后面的第 3 部分要用 Model Analyzer 做系统性搜索而不是凭感觉调参。
 
-## Demonstration
+从以上例子得出的关键结论是：Triton Inference Server 在如何构建更高效的批处理策略上提供了灵活性，从而带来更好的资源利用率、更低的延迟和更高的吞吐。
 
-This section showcases the use of dynamic batching and concurrent model execution using the example for Part 1 of this series.
+## 演示（Demonstration）
 
-### Getting access to the model
+本节用本系列第 1 部分的示例演示动态批处理和并发模型执行的使用。
 
-Let's use the `text recognition` used in part 1. We do need to make some minor changes in the model, namely making the 0th axes of the model have dynamic shape to enable batching. Step 1, download the Text Recognition model weights. Use the NGC PyTorch container as the environment for the following.
+### 获取模型
+
+我们使用第 1 部分用到的 `文本识别` 模型。需要对该模型做一些小改动，即让模型的第 0 维具有动态形状以支持批处理。第 1 步，下载文本识别模型的权重。以下步骤请使用 NGC PyTorch 容器作为环境。
+
 ```
 docker run -it --gpus all -v ${PWD}:/scratch nvcr.io/nvidia/pytorch:<yy.mm>-py3
 cd /scratch
 wget https://www.dropbox.com/sh/j3xmli4di1zuv3s/AABzCC1KGbIRe2wRwa3diWKwa/None-ResNet-None-CTC.pth
 ```
-Export the models as `.onnx` using the file in the `utils` folder. This file is adapted from [Baek et. al. 2019](https://github.com/clovaai/deep-text-recognition-benchmark).
+
+使用 `utils` 文件夹中的模型定义文件将模型导出为 `.onnx`。该文件改编自 [Baek et. al. 2019](https://github.com/clovaai/deep-text-recognition-benchmark)。
+
 ```
 import torch
 from utils.model import STRModel
@@ -113,9 +123,10 @@ trace_input = torch.randn(1, 1, 32, 100)
 torch.onnx.export(model, trace_input, "str.onnx", verbose=True, dynamic_axes={'input.1':[0],'308':[0]})
 ```
 
-### Launching the server
+### 启动服务器
 
-As discussed in `Part 1`, a model repository is a filesystem based repository of models and configuration schema used by the Triton Inference Server (refer to `Part 1` for a more detailed explanation for model repositories). For this example, the model repository structure would need to be set up in the following manner:
+如 `第 1 部分` 所述，模型仓库是 Triton Inference Server 使用的基于文件系统的模型和配置集合（模型仓库的详细解释请参考 `第 1 部分`）。本示例中，模型仓库结构需要按如下方式搭建：
+
 ```
 model_repository
 |
@@ -126,7 +137,8 @@ model_repository
         |
         |-- model.onnx
 ```
-This repository is a subset from the previous example. The key difference in this set up is the use of `instance_group`(s) and `dynamic_batching` in the model configuration. The additions are as follows:
+
+这个仓库是之前示例的子集。与之前设置的关键区别在于模型配置中使用了 `instance_group`（实例组）和 `dynamic_batching`。新增内容如下：
 
 ```
 instance_group [
@@ -137,31 +149,36 @@ instance_group [
 ]
 dynamic_batching { }
 ```
-With `instance_group` users can primarily tweak two things. First, the number of instances of that model deployed on each GPU. The above example will deploy `2` instances of the model `per GPU`. Secondly, the target GPUs for this group can be specified with `gpus: [ <device number>, ... <device number> ]`.
 
-Adding `dynamic_batching {}` will enable the use of dynamic batches. Users can also add `preferred_batch_size` and `max_queue_delay_microseconds` in the body of dynamic batching to manage more efficient batching per their use case. Explore the [model configuration](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/model_configuration.md#model-configuration) documentation for more information.
+通过 `instance_group`，用户可以主要调整两件事。第一，该模型在每个 GPU 上部署的实例数量。上面的示例会在`每个 GPU` 上部署 `2` 个模型实例。第二，可以用 `gpus: [ <device number>, ... <device number> ]` 指定该组的 GPU 目标。
 
-With the model repository set up, the Triton Inference Server can be launched.
+加上 `dynamic_batching {}` 就可以启用动态批处理。用户还可以在 dynamic batching 的配置体中添加 `preferred_batch_size` 和 `max_queue_delay_microseconds`，以便按自己的用例实现更高效的批处理。更多信息请查阅[模型配置](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/model_configuration.md#model-configuration)文档。
+
+模型仓库搭建好后，就可以启动 Triton Inference Server 了。
+
 ```
 docker run --gpus=all -it --shm-size=256m --rm -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}:/workspace/ -v ${PWD}/model_repository:/models nvcr.io/nvidia/tritonserver:yy.mm-py3 bash
 
 tritonserver --model-repository=/models
 ```
 
-### Measuring Performance
+### 测量性能
 
-Having made some improvements to the model's serving capabilities by enabling `dynamic batching` and the use of `multiple model instances`, the next step is to measure the impact of these features. To that end, the Triton Inference Server comes packaged with the [Performance Analyzer](https://github.com/triton-inference-server/perf_analyzer/blob/main/README.md) which is a tool specifically designed to measure performance for Triton Inference Servers. For ease of use, it is recommended that users run this inside the same container used to run client code in Part 1 of this series.
+通过启用 `动态批处理` 和使用`多个模型实例`，我们对模型的 serving 能力做了一些改进，下一步是测量这些特性带来的影响。为此，Triton Inference Server 自带了 [Performance Analyzer](https://github.com/triton-inference-server/perf_analyzer/blob/main/README.md)，这是一个专门用来测量 Triton Inference Server 性能的工具。为方便使用，建议用户在本系列第 1 部分运行客户端代码的同一个容器里运行它。
+
 ```
 docker run -it --net=host -v ${PWD}:/workspace/ nvcr.io/nvidia/tritonserver:yy.mm-py3-sdk bash
 ```
-On a third terminal, it is advisable to monitor the GPU Utilization to see if the deployment is saturating GPU resources.
+
+建议在第三个终端里监控 GPU 利用率，看看部署是否吃满了 GPU 资源。
+
 ```
 watch -n0.1 nvidia-smi
 ```
 
-To measure the performance gain, let's run performance analyzer on the following configurations:
+为了测量性能收益，我们在以下配置上运行性能分析器：
 
-* **No Dynamic Batching, single model instance**: This configuration will be the baseline measurement. To set up the Triton Server in this configuration, do not add `instance_group` or `dynamic_batching` in `config.pbtxt` and make sure to include `--gpus=1` in the `docker run` command to set up the server.
+* **无动态批处理、单模型实例**：该配置作为基线测量。要按此配置搭建 Triton 服务器，不要在 `config.pbtxt` 中添加 `instance_group` 或 `dynamic_batching`，并确保 `docker run` 命令中包含 `--gpus=1` 来搭建服务器。
 
 ```
 # perf_analyzer -m <model name> -b <batch size> --shape <input layer>:<input shape> --concurrency-range <lower number of request>:<higher number of request>:<step>
@@ -197,7 +214,8 @@ Request concurrency: 16
     Avg request latency: 17937 usec (overhead 14 usec + queue 15854 usec + compute input 20 usec + compute infer 2040 usec + compute output 7 usec)
 ```
 
-* **Just Dynamic Batching**: To set up the Triton Server in this configuration, add `dynamic_batching` in `config.pbtxt`.
+* **仅动态批处理**：要按此配置搭建 Triton 服务器，在 `config.pbtxt` 中添加 `dynamic_batching`。
+
 ```
 # Query
 perf_analyzer -m text_recognition -b 2 --shape input.1:1,32,100 --concurrency-range 2:16:2 --percentile=95
@@ -229,9 +247,10 @@ Request concurrency: 16
     Successful request count: 196570
     Avg request latency: 6231 usec (overhead 31 usec + queue 3758 usec + compute input 35 usec + compute infer 2396 usec + compute output 11 usec)
 ```
-As each of the requests had a batch size (of 2), while the maximum batch size of the model was 8, dynamically batching these requests resulted in considerably improved throughput. Another consequence is a reduction in the latency. This reduction can be primarily attributed to reduced wait time in queue wait time. As the requests are batched together, multiple requests can be processed in parallel.
 
-* **Dynamic Batching with multiple model instances**: To set up the Triton Server in this configuration, add `instance_group` in `config.pbtxt` and make sure to include `--gpus=1` and make sure to include `--gpus=1` in the `docker run` command to set up the server. Include `dynamic_batching` per instructions of the previous section in the model configuration. A point to note is that peak GPU utilization on the GPU shot up to 74% (A100 in this case) while just using a single model instance with dynamic batching. Adding one more instance will definitely improve performance but linear perf scaling will not be achieved in this case.
+由于每条请求的批大小是 `2`，而模型的最大批大小是 `8`，对这些请求做动态批处理带来了显著的吞吐提升。另一个结果是延迟下降。这种下降主要归因于队列等待时间减少。请求被合批后，多个请求可以并行处理。
+
+* **动态批处理 + 多个模型实例**：要按此配置搭建 Triton 服务器，在 `config.pbtxt` 中添加 `instance_group`，确保 `docker run` 命令中包含 `--gpus=1`。并按照上一节说明在模型配置中加入 `dynamic_batching`。值得注意的一点是，仅用单模型实例加动态批处理时，GPU 利用率峰值已经冲到了 74%（本例中是 A100）。再加一个实例肯定会改善性能，但在这个场景下无法实现线性性能扩展。
 
 ```
 # Query
@@ -265,8 +284,10 @@ Request concurrency: 16
     Avg request latency: 5287 usec (overhead 29 usec + queue 1878 usec + compute input 36 usec + compute infer 3332 usec + compute output 11 usec)
 ```
 
-This is a perfect example of "simply enabling all the features" isn't a one-size fits all solution. A point to note is that this experiment was conducted by capping the maximum batch size of the model to `8`, while having a single GPU set up. Each production environment is different. Models, hardware, business level SLAs, costs, are all variables which need to be taken into account while selecting appropriate deployment configurations. Running through a grid search for each and every deployment isn't a feasible strategy. To solve this challenge, Triton users can make use of the Model Analyzer covered in Part 3 of this tutorial! Checkout [this section of the documentation](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/optimization.md#optimization) for another example of dynamic batching and multiple model instance.
+这是一个绝佳的例子，说明"简单地把所有特性打开"并不是放之四海而皆准的方案。需要指出的是，本次实验把模型的最大批大小限制为 `8`，并且是单 GPU 环境。每个生产环境都不一样。模型、硬件、业务级 SLA、成本，都是在选择部署配置时需要纳入考量的变量。对每个部署都做网格搜索（grid search）并不是可行的策略。为了解决这个难题，Triton 用户可以使用本教程第 3 部分要讲的 Model Analyzer！也可以看看[文档的这一节](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/optimization.md#optimization)，那里有动态批处理和多个模型实例的另一个示例。
 
-# What's next?
+> 💡 **AI Infra 视角**：注意这三组数字的对比：基线 975 infer/sec → 动态批处理 3187 infer/sec（约 3.3 倍）→ 加多实例 4134 infer/sec（再提升约 30%）。两个启发值得记住：第一，动态批处理通常是投入产出比最高的优化；第二，多实例带来的收益随 GPU 利用率的饱和而递减——配置收益不是线性的，这正是需要自动化工具搜索配置空间的原因。
 
-In this tutorial, we covered the two key concepts, `dynamic batching` and `concurrent model execution`, which can be used to improve resource utilization. This is Part 2 of a 6 part tutorial series which covers the challenges faced in deploying Deep Learning models to production. As you may have figured, there are many possible combinations to use the features discussed in this tutorial, especially with nodes having multiple GPUs. Part 3 covers `Model Analyzer`, a tool which helps to find the best possible deployment configuration.
+# 接下来是什么？
+
+本教程我们讲了两个可以用来提升资源利用率的核心概念：`动态批处理` 和 `并发模型执行`。这是 6 部分教程系列的第 2 部分，该系列讨论的是将深度学习模型部署到生产环境所面临的挑战。你可能已经意识到，本教程讨论的特性可以组合出很多可能性，尤其是在多 GPU 节点上。第 3 部分将介绍 `Model Analyzer`，一个帮助找到最佳部署配置的工具。

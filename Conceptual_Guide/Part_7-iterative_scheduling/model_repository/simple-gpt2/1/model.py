@@ -31,6 +31,7 @@ import triton_python_backend_utils as pb_utils
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 
+# 单条请求的生成状态
 class State:
     def __init__(self):
         self.prompt_tokens_len = 0
@@ -39,18 +40,22 @@ class State:
         self.ignore_eos = False
 
 
+# 对照版 GPT-2：不使用迭代调度，在 execute 内部循环生成完整个批次，
+# 当前批次没生成完之前，新到的请求只能排队等待
 class TritonPythonModel:
+    # 初始化：按模型实例的设备加载 GPT-2 模型
     def initialize(self, args):
         self.state = {}
         device = "cuda" if args["model_instance_kind"] == "GPU" else "cpu"
         device_id = args["model_instance_device_id"]
         self.device = f"{device}:{device_id}"
 
-        # Load the GPT-2 model
+        # 加载 GPT-2 模型与分词器
         self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
         self.model = GPT2LMHeadModel.from_pretrained("gpt2").to(self.device)
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
+    # 自动补全模型配置：声明输入输出、启用动态批处理与 decoupled 模式
     @staticmethod
     def auto_complete_config(config):
         inputs = [
@@ -74,6 +79,7 @@ class TritonPythonModel:
 
         return config
 
+    # 为批内每条请求初始化生成状态（分词、解析参数）
     def init_state(self, states, requests):
         """
         Initializes the state for each request.
@@ -86,6 +92,7 @@ class TritonPythonModel:
             None
         """
         for request in requests:
+            # 读取请求的输入文本
             input_tensor = str(
                 pb_utils.get_input_tensor_by_name(request, "text_input")
                 .as_numpy()
@@ -94,9 +101,11 @@ class TritonPythonModel:
             )
             state = State()
 
+            # 解析请求参数
             parameters = json.loads(request.parameters())
             state.ignore_eos = parameters["ignore_eos"]
             state.max_tokens = parameters["max_tokens"]
+            # 提示词分词得到初始 token 序列
             state.tokens = self.tokenizer(
                 input_tensor, return_tensors="pt", padding=True
             )["input_ids"][0].to(self.device)
@@ -104,11 +113,12 @@ class TritonPythonModel:
 
             states.append(state)
 
+    # 把批内各请求的 token 序列填充对齐，生成 input_ids 与 attention_mask
     def create_batch(self, states):
-        # Find the max sequence length
+        # 找到批内最长序列
         max_len = max([len(x.tokens) for x in states])
 
-        # Pad the input tensors.
+        # 左侧补 EOS token 对齐
         input_ids_torch = torch.cat(
             [
                 torch.cat(
@@ -123,6 +133,7 @@ class TritonPythonModel:
                 for x in states
             ]
         )
+        # 对应的 attention mask：填充位为 0，真实 token 为 1
         attention_mask = torch.cat(
             [
                 torch.cat(
@@ -136,6 +147,7 @@ class TritonPythonModel:
         )
         return input_ids_torch.long(), attention_mask.long().to(self.device)
 
+    # 发送本轮生成的 token；未完成的请求留在循环中继续生成
     def send_responses(self, states, requests, outputs):
         """
         Sends responses to the requests based on the model outputs.
@@ -155,12 +167,13 @@ class TritonPythonModel:
 
         for i, request in enumerate(requests):
             response_sender = request.get_response_sender()
-            # Convert scalar to a one dimensional tensor
+            # 把标量 token 转成一维张量
             generated_token = outputs[i][-1].reshape(1)
 
             max_tokens = states[i].max_tokens + states[i].prompt_tokens_len
             states[i].tokens = torch.cat([states[i].tokens, generated_token])
 
+            # 生成完毕（EOS 或达到上限）→ 发最终响应；否则继续留在循环中
             if (
                 generated_token.item() == self.tokenizer.eos_token_id
                 and not states[i].ignore_eos
@@ -182,6 +195,8 @@ class TritonPythonModel:
             response_sender.send(response, flags=flags)
         return updated_request_list, updated_states
 
+    # 执行入口：在单次调用内循环生成直到当前批次的全部请求完成，
+    # 期间新到达的请求只能排队等待（与 iterative-gpt2 形成对照）
     def execute(self, requests):
         pb_utils.Logger.log_verbose(f"Processing {len(requests)} request(s).")
 

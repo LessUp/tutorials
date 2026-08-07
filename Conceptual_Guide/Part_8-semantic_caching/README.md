@@ -26,140 +26,83 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Semantic Caching
+# 语义缓存（Semantic Caching）
 
-When deploying large language models (LLMs) or LLM-based workflows
-there are two key factors to consider: the performance and cost-efficiency
-of your application. Generating language model outputs requires significant
-computational resources, for example GPU time, memory usage, and other
-infrastructure costs. These resource-intensive requirements create a
-pressing need for optimization strategies that can maintain
-high-quality outputs while minimizing operational expenses.
+在部署大语言模型（LLM）或基于 LLM 的工作流时，有两个关键因素需要考虑：应用的性能和成本效率。生成语言模型输出需要大量的计算资源，例如 GPU 时间、内存占用以及其他基础设施成本。这些资源密集型的需求催生了优化策略的迫切需求——在保持高质量输出的同时尽量降低运营开销。
 
-Semantic caching emerges as a powerful solution to reduce computational costs
-for LLM-based applications.
+语义缓存正是降低 LLM 应用计算成本的一个有力方案。
 
-## Definition and Benefits
+## 定义与收益
 
-**_Semantic caching_** is a caching mechanism that takes into account
-the semantics of the incoming request, rather than just the raw data itself.
-It goes beyond simple key-value pairs and considers the content or
-context of the data.
+**_语义缓存（Semantic caching）_** 是一种把传入请求的语义（semantics）纳入考量的缓存机制，而不仅仅是原始数据本身。它超越了简单的键值对，会考虑数据的内容或上下文。
 
-This approach offers several benefits including, but not limited to:
+这种方法带来的收益包括（但不限于）：
 
-+ **Cost Optimization**
++ **成本优化（Cost Optimization）**
 
-    - Semantic caching can substantially reduce operational expenses associated
-    with LLM deployments. By storing and reusing responses for semantically
-    similar queries, it minimizes the number of actual LLM calls required.
+    - 语义缓存可以大幅降低 LLM 部署相关的运营开销。通过存储并复用语义相似查询的响应，它把实际需要调用的 LLM 次数降到最低。
 
-+ **Reduced Latency**
++ **降低延迟（Reduced Latency）**
 
-    - One of the primary benefits of semantic caching is its ability to
-    significantly improve response times. By retrieving cached responses for
-    similar queries, the system can bypass the need for full model inference,
-    resulting in reduced latency.
+    - 语义缓存的主要收益之一是能显著改善响应时间。通过为相似查询直接取回缓存响应，系统可以绕过完整的模型推理，从而降低延迟。
 
-+ **Increased Throughput**
++ **提高吞吐（Increased Throughput）**
 
-    - Semantic caching allows for more efficient utilization of computational
-    resources. By serving cached responses for similar queries, it reduces the
-    load on infrastructure components. This efficiency enables the system
-    to handle a higher volume of requests with the same hardware, effectively
-    increasing throughput.
+    - 语义缓存让计算资源得到更高效的利用。通过为相似查询提供缓存响应，它减轻了基础设施组件的负载。这种高效性使系统能用同样的硬件处理更大量的请求，实际上提高了吞吐。
 
-+ **Scalability**
++ **可扩展性（Scalability）**
 
-    - As the user base and the volume of queries grow, the probability of cache
-    hits increases, provided that there is adequate storage and resources
-    available to support this scaling. The improved resource efficiency and
-    reduced computational demands allows applications to serve more users
-    without a proportional increase in infrastructure costs.
+    - 随着用户规模和查询量的增长，只要有足够的存储和资源支持这种扩展，缓存命中率就会随之提高。资源效率的提升和计算需求的降低，让应用可以在不按比例增加基础设施成本的情况下服务更多用户。
 
-+ **Consistency in Responses**
++ **响应一致性（Consistency in Responses）**
 
-    - For certain applications, maintaining consistency in responses to
-    similar queries can be beneficial. Semantic caching ensures that analogous
-    questions receive uniform answers, which can be particularly useful
-    in scenarios like customer service or educational applications.
+    - 对于某些应用，保持相似查询响应的一致性是有益的。语义缓存确保类似的问题得到统一的答案，这在客户服务或教育类场景中尤其有用。
 
-## Sample Reference Implementation
+> 💡 **AI Infra 视角**：LLM 推理的成本大头是 GPU 时间，而实际线上流量里大量查询是重复或近似的（客服问答、文档检索、代码补全提示）。语义缓存的价值在于用"一次向量检索 + 内存读取"（毫秒级）替代一次完整生成（百毫秒到秒级），相当于免费获得 N 倍吞吐。设计要点：相似度阈值要按业务容忍度调，且必须考虑 prompt 参数（temperature、max_tokens）是否参与缓存键——本教程末尾的局限部分就指出了这一点。
 
-In this tutorial we provide a reference implementation for a Semantic Cache in
-[semantic_caching.py](./artifacts/semantic_caching.py). There are 3 key
-dependencies:
-* [SentenceTransformer](https://sbert.net/): a Python framework for computing
-dense vector representations (embeddings) of sentences, paragraphs, and images.
-    - We use this library and `all-MiniLM-L6-v2` in particular to convert
-    incoming prompt into an embedding, enabling semantic comparison.
-    - Alternatives include [semantic search models](https://www.sbert.net/docs/sentence_transformer/pretrained_models.html#semantic-search-models),
-    OpenAI Embeddings, etc.
-* [Faiss](https://github.com/facebookresearch/faiss/wiki): an open-source library
-developed by Facebook AI Research for efficient similarity search and
-clustering of dense vectors.
-    - This library is used for the embedding store and extracting the most
-    similar embedded prompt from the cached requests (or from the index store).
-    - This is a mighty library with a great variety of CPU and GPU accelerated
-    algorithms.
-    - Alternatives include [annoy](https://github.com/spotify/annoy), or
-    [cuVS](https://github.com/rapidsai/cuvs). However, note that cuVS already
-    has an integration in Faiss, more on this can be found [here](https://docs.rapids.ai/api/cuvs/nightly/integrations/faiss/).
-* [Theine](https://github.com/Yiling-J/theine): High performance in-memory
-cache.
-    - We will use it as our exact match cache backend. After the most similar
-    prompt is identified, the corresponding cached response is extracted from
-    the cache. This library supports multiple eviction policies, in this
-    tutorial we use "LRU".
-    - One may also look into [MemCached](https://memcached.org/about) as a
-    potential alternative.
+## 参考实现示例（Sample Reference Implementation）
 
-Provided [script](./artifacts/semantic_caching.py) is heavily annotated and we
-encourage users to look through the code to gain better clarity in all
-the necessary stages.
+本教程在 [semantic_caching.py](./artifacts/semantic_caching.py) 中提供了一个语义缓存的参考实现。它有三个关键依赖：
 
-## Incorporating Semantic Cache into your workflow
+* [SentenceTransformer](https://sbert.net/)：一个用于计算句子、段落和图片的稠密向量表示（embeddings）的 Python 框架。
+    - 我们用这个库（特别是 `all-MiniLM-L6-v2`）把传入的 prompt 转换为 embedding，从而实现语义比较。
+    - 备选方案包括[语义搜索模型](https://www.sbert.net/docs/sentence_transformer/pretrained_models.html#semantic-search-models)、OpenAI Embeddings 等。
+* [Faiss](https://github.com/facebookresearch/faiss/wiki)：Facebook AI Research 开发的开源库，用于稠密向量的高效相似度搜索和聚类。
+    - 这个库用于 embedding 存储，以及从缓存的请求（或索引存储）中提取最相似的已嵌入 prompt。
+    - 这是一个功能强大的库，提供各种各样的 CPU 和 GPU 加速算法。
+    - 备选方案包括 [annoy](https://github.com/spotify/annoy) 或 [cuVS](https://github.com/rapidsai/cuvs)。不过注意，cuVS 已经集成在 Faiss 中，更多信息见[这里](https://docs.rapids.ai/api/cuvs/nightly/integrations/faiss/)。
+* [Theine](https://github.com/Yiling-J/theine)：高性能的内存缓存。
+    - 我们将把它用作精确匹配缓存的后端。找到最相似的 prompt 后，从缓存中取出对应的缓存响应。这个库支持多种淘汰策略，本教程使用 "LRU"。
+    - 也可以考虑 [MemCached](https://memcached.org/about) 作为备选方案。
 
-For this tutorial, we'll use the [vllm backend](https://github.com/triton-inference-server/vllm_backend)
-as our example, focusing on demonstrating how to cache responses for the
-non-streaming case. The principles covered here can be extended to handle
-streaming scenarios as well.
+提供的[脚本](./artifacts/semantic_caching.py)注释非常详尽，我们鼓励用户通读代码，以便更清楚地理解各个必要阶段。
 
-### Customising vLLM Backend
+## 把语义缓存集成到你的工作流
 
-First, let's start by cloning Triton's vllm backend repository. This will
-provide the necessary codebase to implement our semantic caching example.
+本教程以 [vllm backend](https://github.com/triton-inference-server/vllm_backend) 为例，重点演示如何为非流式（non-streaming）场景缓存响应。这里讲的原则也可以推广到流式场景。
+
+### 定制 vLLM Backend
+
+首先，克隆 Triton 的 vllm backend 仓库。这将提供实现我们语义缓存示例所需的代码库。
 
 ```bash
 git clone https://github.com/triton-inference-server/vllm_backend.git
 cd vllm_backend
 ```
 
-With the repository successfully cloned, the next step is to apply all
-necessary modifications. To simplify this process, we've prepared a
-[semantic_cache.patch](./artifacts/semantic_cache.patch)
-that consolidates all changes into a single step:
+仓库克隆成功后，下一步是应用所有必要的修改。为了简化这个过程，我们准备了一个 [semantic_cache.patch](./artifacts/semantic_cache.patch)，把全部改动合并成一步：
 
 ```bash
 curl https://raw.githubusercontent.com/triton-inference-server/tutorials/refs/heads/main/Conceptual_Guide/Part_8-semantic_caching/artifacts/semantic_cache.patch | git apply -v
 ```
 
-If you're eager to start using Triton with the optimized vLLM backend,
-you can skip ahead to the
-[Launching Triton with Optimized vLLM Backend](#launching-triton-with-optimized-vllm-backend)
-section. However, for those interested in understanding the specifics,
-let's explore what this patch includes.
+如果你急着开始使用优化后的 vLLM backend 跑 Triton，可以直接跳到[使用优化后的 vLLM Backend 启动 Triton](#launching-triton-with-optimized-vllm-backend)一节。不过，如果你对细节感兴趣，我们来看看这个 patch 包含什么。
 
-The patch introduces a new script,
-[semantic_caching.py](./artifacts/semantic_caching.py), which is added to the
-appropriate directory. This script implements the core logic for our
-semantic caching functionality.
+这个 patch 引入了一个新脚本 [semantic_caching.py](./artifacts/semantic_caching.py)，并把它放入合适的目录。这个脚本实现了语义缓存功能的核心逻辑。
 
-Next, the patch integrates semantic caching into the model. Let's walk through
-these changes step-by-step.
+接下来，patch 把语义缓存集成到模型中。我们一步步来看这些改动。
 
-Firstly, it imports the necessary classes from
-[semantic_caching.py](./artifacts/semantic_caching.py) into the codebase:
+首先，它把 [semantic_caching.py](./artifacts/semantic_caching.py) 中的必要类导入代码库：
 
 ```diff
 ...
@@ -168,9 +111,7 @@ from utils.metrics import VllmStatLogger
 +from utils.semantic_caching import SemanticCPUCacheConfig, SemanticCPUCache
 ```
 
-Next, it sets up the semantic cache during the initialization step.
-This setup will prepare your model to utilize semantic caching during
-its operations.
+接下来，它在初始化阶段设置语义缓存。这个设置会让你的模型在运行期间使用语义缓存。
 
 ```diff
     def initialize(self, args):
@@ -191,9 +132,7 @@ its operations.
 
 ```
 
-Finally, the patch incorporates logic to query and update the semantic cache
-during request processing. This ensures that cached responses are efficiently
-utilized whenever possible.
+最后，patch 在请求处理过程中加入了查询和更新语义缓存的逻辑。这确保缓存响应在可能的情况下被高效利用。
 
 ```diff
     async def generate(self, request):
@@ -237,15 +176,9 @@ utilized whenever possible.
 
 ```
 
-### Launching Triton with Optimized vLLM Backend
+### 使用优化后的 vLLM Backend 启动 Triton
 
-To evaluate or optimized vllm backend, let's start vllm docker container and
-mount our implementation to `/opt/tritonserver/backends/vllm`. We'll
-also mount sample model repository, provided in
-`vllm_backend/samples/model_repository`. Feel free to set up your own.
-Use the following docker command to start Triton's vllm docker container,
-but make sure to specify proper paths to the cloned `vllm_backend`
-repository and replace `<xx.yy>` with the latest release of Triton.
+为了评估优化后的 vllm backend，我们启动 vllm docker 容器，并把我们的实现挂载到 `/opt/tritonserver/backends/vllm`。我们还会挂载示例模型仓库，它位于 `vllm_backend/samples/model_repository`。你也可以自由设置自己的仓库。用下面的 docker 命令启动 Triton 的 vllm docker 容器，但请确保把路径换成克隆的 `vllm_backend` 仓库的正确路径，并把 `<xx.yy>` 替换为 Triton 的最新版本。
 
 ```bash
 docker run --gpus all -it --net=host --rm \
@@ -256,19 +189,19 @@ docker run --gpus all -it --net=host --rm \
     nvcr.io/nvidia/tritonserver:<xx.yy>-vllm-python-py3
 ```
 
-When inside the container, make sure to install required dependencies:
+进入容器后，确保安装所需依赖：
+
 ```bash
 pip install sentence_transformers faiss_gpu theine
 ```
 
-Finally, let's launch Triton
+最后启动 Triton：
+
 ```bash
 tritonserver --model-repository=model_repository/
 ```
 
-After you start Triton you will see output on the console showing
-the server starting up and loading the model. When you see output
-like the following, Triton is ready to accept inference requests.
+启动 Triton 后，你会在控制台上看到服务器启动和加载模型的输出。当你看到类似下面的输出时，Triton 就可以接受推理请求了。
 
 ```
 I1030 22:33:28.291908 1 grpc_server.cc:2513] Started GRPCInferenceService at 0.0.0.0:8001
@@ -276,20 +209,18 @@ I1030 22:33:28.292879 1 http_server.cc:4497] Started HTTPService at 0.0.0.0:8000
 I1030 22:33:28.335154 1 http_server.cc:270] Started Metrics Service at 0.0.0.0:8002
 ```
 
-### Evaluation
+### 评估
 
-After you [start Triton](#launching-triton-with-optimized-vllm-backend)
-with the sample model_repository, you can quickly run your first inference
-request with the
-[generate endpoint](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_generate.md).
+用示例 model_repository [启动 Triton](#launching-triton-with-optimized-vllm-backend) 后，你可以用 [generate 端点](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_generate.md)快速发起你的第一个推理请求。
 
-We'll also time this query:
+我们还会给这个查询计时：
 
 ```bash
 time curl -X POST localhost:8000/v2/models/vllm_model/generate -d '{"text_input": "Tell me, how do I create model repository for Triton Server?", "parameters": {"stream": false, "temperature": 0, "max_tokens":100}, "exclude_input_in_output":true}'
 ```
 
-Upon success, you should see a response from the server like this one:
+成功后，你应该看到服务器返回类似这样的响应：
+
 ```
 {"model_name":"vllm_model","model_version":"1","text_output": <MODEL'S RESPONSE>}
 real	0m1.128s
@@ -297,13 +228,14 @@ user	0m0.000s
 sys	0m0.015s
 ```
 
-Now, let's try a different response, but keep the semantics:
+现在，我们换一种说法，但保持语义相同：
 
 ```bash
 time curl -X POST localhost:8000/v2/models/vllm_model/generate -d '{"text_input": "How do I set up model repository for Triton Inference Server?", "parameters": {"stream": false, "temperature": 0, "max_tokens":100}, "exclude_input_in_output":true}'
 ```
 
-Upon success, you should see a response from the server like this one:
+成功后，你应该看到服务器返回类似这样的响应：
+
 ```
 {"model_name":"vllm_model","model_version":"1","text_output": <SAME MODEL'S RESPONSE>}
 real	0m0.038s
@@ -311,13 +243,14 @@ user	0m0.000s
 sys	0m0.017s
 ```
 
-Let's try one more:
+再试一次：
 
 ```bash
 time curl -X POST localhost:8000/v2/models/vllm_model/generate -d '{"text_input": "How model repository should be set up for Triton Server?", "parameters": {"stream": false, "temperature": 0, "max_tokens":100}, "exclude_input_in_output":true}'
 ```
 
-Upon success, you should see a response from the server like this one:
+成功后，你应该看到服务器返回类似这样的响应：
+
 ```
 {"model_name":"vllm_model","model_version":"1","text_output": <SAME MODEL'S RESPONSE>}
 real	0m0.059s
@@ -325,35 +258,16 @@ user	0m0.016s
 sys	0m0.000s
 ```
 
-Clearly, the latter 2 requests are semantically similar to the first one, which
-resulted in a cache hit scenario, which reduced the latency of our model from
-approx 1.1s to the average of 0.048s per request.
+很明显，后两个请求与第一个请求在语义上相似，这触发了缓存命中场景，把模型的延迟从约 1.1 秒降到了平均每请求 0.048 秒。
 
-## Current Limitations
+## 当前的局限（Current Limitations）
 
-* The current implementation of the Semantic Cache only considers the prompt
-itself for cache hits, without accounting for additional request parameters
-such as `max_tokens` and `temperature`. As a result, these parameters are not
-included in the cache hit evaluation, which may affect the accuracy of cached
-responses when different configurations are used.
+* 当前语义缓存的实现只考虑 prompt 本身来决定缓存命中，没有考虑 `max_tokens`、`temperature` 等附加请求参数。因此这些参数不参与缓存命中评估，在使用不同配置时可能会影响缓存响应的准确性。
 
-* Semantic Cache effectiveness is heavily reliant on the choice of embedding
-model and application context. For instance, queries like "How to set up model
-repository for Triton Inference Server?" and "How not to set up model
-repository for Triton Inference Server?" may have high cosine similarity
-despite differing semantically. This makes it challenging to set an optimal
-threshold for cache hits, as a narrow similarity range might exclude useful
-cache entries.
+* 语义缓存的有效性高度依赖 embedding 模型的选择和应用场景。例如，"How to set up model repository for Triton Inference Server?" 和 "How not to set up model repository for Triton Inference Server?" 这两条查询可能有很高的余弦相似度，但语义截然不同。这让设置最优的缓存命中阈值变得很有挑战性，因为相似度范围收窄可能会排除有用的缓存条目。
 
-## Interested in This Feature?
+## 对这个特性感兴趣吗？
 
-While this reference implementation provides a glimpse into the potential
-of semantic caching, it's important to note that it's not an officially
-supported feature in Triton Inference Server.
+这个参考实现让你一窥语义缓存的潜力，但请注意，它并不是 Triton Inference Server 官方支持的特性。
 
-We value your input! If you're interested in seeing semantic caching as a
-supported feature in future releases, we invite you to join the ongoing
-[discussion](https://github.com/triton-inference-server/server/discussions/7742).
-Provide details about why you think semantic caching would
-be valuable for your use case. Your feedback helps shape our product roadmap,
-and we appreciate your contributions to making our software better for everyone.
+我们很重视你的意见！如果你希望语义缓存在未来版本中成为受支持的特性，欢迎加入正在进行的[讨论](https://github.com/triton-inference-server/server/discussions/7742)。请说明为什么你认为语义缓存对你的用例有价值。你的反馈会帮助塑造我们的产品路线图，我们感谢你为让我们的软件对每个人更好所做的贡献。

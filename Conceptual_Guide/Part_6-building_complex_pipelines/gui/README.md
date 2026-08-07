@@ -27,9 +27,10 @@
 -->
 
 # Stable Diffusion UI
-A simple Gradio UI for communicating with Stable Diffusion on Triton
 
-## To deploy
+一个用于与 Triton 上的 Stable Diffusion 通信的简易 Gradio 界面
+
+## 部署方式
 ```
 pip install -r requirements.txt
 python client.py --triton_url <YOUR_TRITON_SERVER_URL>

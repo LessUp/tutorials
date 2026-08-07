@@ -34,6 +34,8 @@ from sentence_transformers import SentenceTransformer
 from theine import Cache
 
 
+# 双向映射：在可哈希的 key（prompt 字符串）与整数 ID 之间建立互查关系，
+# 让 Faiss 向量索引（只认整数 ID）和缓存条目（用 key 存取）能对应起来
 class KeyMapper:
     """
     A class to manage bidirectional mapping between hashable keys and integer IDs.
@@ -44,6 +46,7 @@ class KeyMapper:
         self.kh_map: Dict[int, Hashable] = {}
         self.counter = itertools.count()
 
+    # 添加新 key 并分配自增 ID；key 已存在则返回 None
     def add_key(self, key: Hashable):
         """
         Add a new key to the mapper and return its assigned ID.
@@ -61,6 +64,7 @@ class KeyMapper:
         self.kh_map[id] = key
         return id
 
+    # 删除 key 并返回其 ID（缓存淘汰时同步清理）
     def remove_key(self, key: Hashable):
         """
         Remove key from the mapper and return its ID.
@@ -77,6 +81,7 @@ class KeyMapper:
             return id
         return None
 
+    # 由 ID 反查 key
     def get_key(self, id: int):
         """
         Retrieve the key associated with the given ID.
@@ -89,6 +94,7 @@ class KeyMapper:
         """
         return self.kh_map.get(id)
 
+    # 由 key 查询 ID
     def get_id(self, key: Hashable):
         """
         Retrieve the ID associated with the given key.
@@ -102,6 +108,7 @@ class KeyMapper:
         return self.hk_map.get(key)
 
 
+# 语义缓存配置：embedding 编码器、Faiss 相似度索引、LRU 缓存与命中阈值
 @dataclass
 class SemanticCPUCacheConfig:
     """
@@ -125,11 +132,14 @@ class SemanticCPUCacheConfig:
     cache: Any = Cache(policy="lru", size=1000)
     encoder: Any = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     encoder_dim: int = 384
+    # 向量索引：用 L2 距离做最近邻搜索，ID 由 KeyMapper 分配
     index: Any = faiss.IndexIDMap(faiss.IndexFlatL2(encoder_dim))
+    # 命中阈值：L2 距离小于该值才算语义相似（注意这是距离，越小越相似）
     threshold: float = 0.25
     key_mapper: Any = KeyMapper()
 
 
+# 语义缓存：核心是 "prompt 向量化 → Faiss 相似度检索 → 命中则直接返回缓存响应"
 class SemanticCPUCache:
     """
     Semantic cache implementation.
@@ -163,9 +173,11 @@ class SemanticCPUCache:
         Returns:
             Any: The retrieved value or the default value.
         """
+        # 索引为空时直接返回未命中
         if self.index.ntotal < 1:
             return default
 
+        # 把查询 prompt 编码成 embedding，送入 Faiss 检索
         key_search = np.asarray([self.encoder.encode(key)])
         # The vector index returns two values, distance to the most similar
         # embedding (1 indicates we only need top 1 similar result), and
@@ -178,10 +190,11 @@ class SemanticCPUCache:
         if dist[0][0] > self.threshold:
             return default
 
-        # To retrieve the cache hit from the cache store, we need to retrieve
-        # the corresponding prompt from the key_map store, given its index.
+        # 命中后需要拿到对应的原始 prompt 字符串才能查缓存：
+        # 先由向量索引返回的整数 ID 反查出 key
         key_str = self.key_map.get_key(ind[0][0])
 
+        # 再到精确匹配缓存里取出缓存的响应
         return self.cache.get(key=key_str, default=default)
 
     def set(self, key: Hashable, value: Any) -> Optional[str]:
@@ -201,14 +214,14 @@ class SemanticCPUCache:
         Raises:
             AssertionError: If the key could not be added to the key mapper.
         """
+        # 为新 key 分配 ID，并把其 embedding 连同 ID 加入 Faiss 索引
         id = self.key_map.add_key(key)
         assert id is not None, "Adding key to the key map failed, returned id is None."
         self.index.add_with_ids(
             np.expand_dims(self.encoder.encode(key), axis=0), np.asarray([id])
         )
-        # Adding a new entry into the cache can evict an old entry, according
-        # to the policy in-use. We need to make sure we evict the same entry
-        # from the vector index, stored in `self.index`.
+        # 写入缓存可能按淘汰策略（LRU）挤掉旧条目，
+        # 需要把被淘汰的条目同步从向量索引和 key_map 中移除，保持三处一致
         evicted_key = self.cache.set(key, value)
         self._handle_evicted_key(evicted_key=evicted_key)
 
@@ -226,6 +239,7 @@ class SemanticCPUCache:
             evicted_key (Optional[Hashable]): The key that was evicted from the
             cache.
         """
+        # 缓存淘汰处理：从 key_map 移除 key，并从 Faiss 索引中删除对应向量
         if evicted_key:
             evicted_id = self.key_map.remove_key(evicted_key)
             self.index.remove_ids(np.array([evicted_id]))

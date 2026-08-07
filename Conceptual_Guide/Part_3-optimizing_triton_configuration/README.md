@@ -27,48 +27,51 @@
 -->
 
 
-# Customizing deployment with Model Analyzer
-| Navigate to | [Part 2: Improving Resource Utilization](../Part_2-improving_resource_utilization/) | [Part 4: Accelerating Models](../Part_4-inference_acceleration/) |
+# 使用 Model Analyzer 定制部署（Customizing deployment with Model Analyzer）
+
+| 跳转到 | [第 2 部分：提升资源利用率](../Part_2-improving_resource_utilization/) | [第 4 部分：模型加速](../Part_4-inference_acceleration/) |
 | ------------ | --------------- | --------------- |
 
 
-Every inference deployment has its unique set of challenges. These challenges may arise from Service Level Agreements about maintaining latency, limited hardware resources, unique requirements of individual models, the nature and the volume of requests, or something completely different. Additionally, the Triton Inference Server has many features which can be leveraged be make tradeoffs between memory consumption and performance.
+每个推理部署都有一组独特的挑战。这些挑战可能来自关于延迟的 SLA（服务等级协议）、有限的硬件资源、单个模型的特殊需求、请求的性质和数量，或者其他完全不同的原因。此外，Triton Inference Server 有很多特性可以用来在内存占用和性能之间做权衡。
 
-With the sheer number of features and requirements, finding an optimal configuration for each deployment becomes a task for "Sweeping" through each of the possible configurations to measure performance. This discussion covers:
-* Performance Discussion
-* Using Model Analyzer to find optimal configuration
+面对数量众多的特性和需求，为每个部署找到最优配置就变成了一项"扫一遍所有可能的配置来测量性能"的工作。本部分将讨论：
+* 性能讨论
+* 使用 Model Analyzer 找到最优配置
 
-## Performance Discussion
+## 性能讨论（Performance Discussion）
 
-Measuring performance for an inference serving architecture is a fairly complex problem. This complexity arises from the fact that "running inference" is just one piece of the puzzle. To understand this, let's walk through how the Triton Inference Server would process a query with dynamic batching enabled and multiple model instances being used.
+为推理服务架构测量性能是一个相当复杂的问题。复杂性源于"运行推理"只是整个链条中的一环。为了理解这一点，我们走一遍：启用动态批处理、使用多个模型实例时，Triton Inference Server 会如何处理一条查询。
 
 ![Triton Architecture](./img/arch.jpg)
 
-Once a query is sent from the client, Triton's handler enqueues it in the requested model's queue. Once one of the model instances is freed up, a dynamic batch with size corresponding to the preferred batch size is formed using the queries, other incoming queries, or queries which are already in the queue. This batch is then converted to the format required by the framework and sent to the Framework runtimes (PyTorch, TensorFlow, TensorRT, etc.). Post inference, these results are returned to the client.
+查询从客户端发出后，Triton 的处理器（handler）把它排入所请求模型的队列。一旦某个模型实例空闲，就会利用该查询、其他正在到达的查询或已在队列中的查询，形成一个与首选批大小（preferred batch size）对应的动态批次。这个批次随后被转换成框架所需的格式，发送给框架运行时（PyTorch、TensorFlow、TensorRT 等）。推理完成后，结果返回给客户端。
 
-In this process, there are three major contributors of latency:
-* Network Latency
-* Inference Compute time
-* Latency caused due to wait time in the model's queue
+在这个过程中，有三个主要的延迟来源：
+* 网络延迟（Network Latency）
+* 推理计算时间（Inference Compute time）
+* 模型队列中的等待时间（Latency caused due to wait time in the model's queue）
 
-Minimizing **Network latency** is a case by case process. For instance, let's consider computer vision models. These models use image frames, videos and 3D data like point clouds which can be quite large in size, thus requiring higher bandwidth to move. Most images are saved in float32 format, which can be converted to float16 format. This may affect the dynamic range in the image, which may or may not affect model performance based preprocessing steps taken while training the model but can definitely reduce the latency as less data needs to be transmitted.
+最小化**网络延迟**是一个因情况而异的过程。比如考虑计算机视觉模型：这些模型使用图像帧、视频和点云等 3D 数据，数据量可能很大，因此需要更高的带宽来传输。大多数图像以 float32 格式保存，可以转换为 float16 格式。这可能影响图像的动态范围，从而可能影响模型性能（取决于训练时采用的预处理步骤），但绝对可以减少延迟，因为需要传输的数据更少了。
 
-Accelerating models to trim down the effective **compute time** is commonly achieved with a plethora of techniques like: optimizing the network graphs by fusing layers, reducing models precision, fusing kernels and more! This topic is covered in much more depth in Part 4 of this series.
+加速模型以压缩实际**计算时间**通常通过大量技术实现，比如：融合层来优化网络图、降低模型精度、融合内核等等！这个话题在本系列第 4 部分有更深入的讨论。
 
-Latency in **queues** can primarily be addressed by adding more instances of the model. This may or may not require additional resources based on the GPU utilization of the current number of instances. This is the core utilization problem that needs to be solved specifically for each deployment environment. To streamline this experience, Triton Inference Server comes with Model Analyzer.
+**队列**中的延迟主要可以通过增加模型实例来解决。根据当前实例数量的 GPU 利用率情况，这可能不一定会带来额外的资源需求。这是每个部署环境都需要专门解决的核心资源利用问题。为了简化这一流程，Triton Inference Server 自带 Model Analyzer。
 
-Model Analyzer is a CLI tool to help with a better understanding of the compute and memory requirements of the Triton Inference Server models by sweeping through configurations settings and generating reports summarizing performance.
+> 💡 **AI Infra 视角**：把推理延迟拆成"网络 + 计算 + 排队"三段是性能排查的基本功。真实线上调优的常见流程是：先用 perf_analyzer 看端到端延迟构成（server 侧日志会打印 queue/compute 细分），如果 queue 占比高说明实例不够或批策略待调，如果 compute 占比高则要去做模型加速（第 4 部分）。不要一上来就加 GPU，先分清瓶颈在哪一段。
 
-With Model Analyzer users can:
-* Run customizable configuration sweeps to identify the best possible configuration for the expected workload and hardware.
-* Summarize findings about latency, throughput, GPU resource utilizations, power draw and more, with detailed reports, metrics and graphs. These reports help compare performance across different configurations of setup.
-* Tailor model deployments to cater to user's Quality of Service requirements like specific p99 latency limits, GPU memory utilization and minimum throughput!
+Model Analyzer 是一个 CLI 工具，通过扫描各种配置设置并生成汇总性能的报告，帮助你更好地了解 Triton Inference Server 模型的计算和内存需求。
 
-## Using Model Analyzer
+使用 Model Analyzer，用户可以：
+* 运行可定制的配置扫描，为预期工作负载和硬件找出最佳配置。
+* 通过详细的报告、指标和图表，汇总关于延迟、吞吐、GPU 资源利用率、功耗等方面的发现。这些报告有助于比较不同配置之间的性能表现。
+* 让模型部署满足用户的服务质量（QoS）要求，比如特定的 p99 延迟上限、GPU 内存利用率以及最低吞吐量！
 
-### Pre-requisites
+## 使用 Model Analyzer
 
-Refer to Part 2 of this series to get access to the models. Refer to the Model Analyzer [installation guide](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/install.md#recommended-installation-method) for more information about installing Model Analyzer. For ease of following along, use these commands to install model analyzer:
+### 前置条件
+
+请参考本系列第 2 部分获取模型。关于安装 Model Analyzer 的更多信息，请参考 Model Analyzer 的[安装指南](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/install.md#recommended-installation-method)。为方便跟做，请使用以下命令安装 model analyzer：
 
 ```
 sudo apt-get update && sudo apt-get install python3-pip
@@ -76,59 +79,62 @@ sudo apt-get update && sudo apt-get install wkhtmltopdf
 pip3 install triton-model-analyzer
 ```
 
-### Usage details
+### 用法细节
 
-Before diving into details with an example, a discussion about the overall functionality and capability is needed to understand how best to use the Model Analyzer tool. Let's begin the discussion by focusing on what is most important to the users: setting `objectives` and `constraints` for the sweeps.
+在用示例深入细节之前，先讨论一下整体功能与能力，以便理解如何最好地使用 Model Analyzer 工具。我们从用户最关心的部分开始讨论：为扫描设置 `objectives`（目标）和 `constraints`（约束）。
 
-- **objectives**: Users can choose to order the results on the basis of their deployment goals, throughput, latency, or tailoring to specific resource constraints. [Learn more](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#objective).
+- **objectives（目标）**：用户可以根据自己的部署目标——吞吐、延迟，或针对特定资源约束——对结果排序。[了解更多](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#objective)。
 
-    Model Analyzer has two modes, Online and Offline. In online mode users can specify latency budgets for their deployments to cater to their requirements. For Offline mode a similar specification can be mode for minimum throughput. [Learn more](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/cli.md#model-analyzer-modes)
+    Model Analyzer 有两种模式：在线（Online）和离线（Offline）。在线模式下，用户可以为部署指定延迟预算以满足需求；离线模式下可以类似地指定最低吞吐量。[了解更多](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/cli.md#model-analyzer-modes)
 
-- **constraints**: Users can also choose to constrain the selection of sweeps to specific requirements for throughput, latency or gpu memory utilization. [Learn more](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#constraint)
+- **constraints（约束）**：用户也可以把扫描的选择限制在吞吐、延迟或 GPU 内存利用率的特定要求上。[了解更多](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#constraint)
 
-With the more broader selections discussed, let's talk about the two key sub commands that users need to use to make use of Model Analyzer: `profile`, and `report`. While most of the settings for these commands can be set using a flag, some require building a configuration file. Refer to [this section](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md) of the documentation for a comprehensive list of settings.
+讨论完更宽泛的选择后，我们来谈使用 Model Analyzer 需要掌握的两个关键子命令：`profile` 和 `report`。这些命令的大多数设置可以通过 flag 指定，但有些需要构建配置文件。完整设置列表请参考文档的[这一节](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md)。
 
-- **profile**: `profile` is used to run the benchmarking sweeps. This is where users specify the sweep space details like number of instances per GPU, range of maximum batch sizes for the model, maximum cpu utilization, batch sizes of the queries sent, number of concurrent queries sent to Triton and [more](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#config-options-for-profile). `profile` runs these sweeps, records the performance of each of the configurations and saves runs are checkpoints. Think of this step as simply running a large number of experiments and recording data points for analysis. This step will take 60-90 minutes to run. User's can use the `--run-config-search-mode quick` flag for a quicker sweep with fewer configs. Refer to the [documentation](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#config-options-for-profile) for more information or if you want a quicker and smaller sweep.
+- **profile**：`profile` 用于运行基准测试扫描。在这里用户指定扫描空间细节，比如每个 GPU 的实例数、模型最大批大小的范围、最大 CPU 利用率、发送查询的批大小、发送给 Triton 的并发查询数量以及[更多](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#config-options-for-profile)。`profile` 运行这些扫描，记录每个配置的性能，并把运行结果保存为检查点。可以把这一步理解成简单地运行大量实验并记录数据点供分析。这一步大约需要 60-90 分钟。用户可以使用 `--run-config-search-mode quick` flag 进行更快速、配置更少的扫描。更多信息，或想要更快、更小的扫描，请参考[文档](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#config-options-for-profile)。
 
-- **report**: The `report` subcommand generates detailed reports of the top configurations as well as a summary. These reports contain:
-  - A chart outlining throughput and latency across an increasing number of concurrent requests sent to the server (detailed)
-  - A GPU Memory VS Latency and GPU Utilization vs Latency chart (detailed)
-  - A table outlining p99 latency, various components of latency, throughput, GPU Utilization and GPU memory utilization across for up to the maximum number of concurrent request selected in the profiling step (default is 1024) (detailed)
-  - A Throughput vs Latency Plot, a GPU Memory vs Latency Plot and a table containing high level details comparing the same across the top configs and the default configuration selected by the user. (summary)
+- **report**：`report` 子命令生成最佳配置的详细报告以及一份汇总。这些报告包含：
+  - 一张图表，展示随发送给服务器的并发请求数增加时吞吐和延迟的变化（详细报告）
+  - 一张 GPU 内存 vs 延迟、GPU 利用率 vs 延迟的图表（详细报告）
+  - 一张表格，列出 p99 延迟、延迟的各组成部分、吞吐、GPU 利用率和 GPU 内存利用率，覆盖到 profiling 步骤中选择的最大并发请求数（默认为 1024）（详细报告）
+  - 一张吞吐 vs 延迟图、一张 GPU 内存 vs 延迟图，以及一张比较最佳配置与用户所选默认配置高层细节的表格（汇总报告）
 
-These selections will be more tangible after observing an example in the next section.
+看完下一节的示例后，这些选择会更具体。
 
-### Example
+### 示例
 
-Consider the deployment of the text recognition model with a latency budget of `10 ms`. The first step is to profile the model. This command initiates a sweeping run and records performance.
+考虑以 `10 ms` 的延迟预算部署文本识别模型。第一步是给模型做 profile。这个命令会启动一轮扫描并记录性能。
 
 `model-analyzer profile --model-repository /path/to/model/repository --profile-models <name of the model> --triton-launch-mode=<launch mode: local/docker etc> --output-model-repository-path /path/to/output -f <path to config file> --run-config-search-mode quick`
 
-Note: The config file contains the shape of the query image. Refer the Launch mode [documentation](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/launch_modes.md) for more info about the launch mode flag.
+注意：配置文件包含查询图片的形状。关于 launch mode flag 的更多信息，请参考启动模式[文档](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/launch_modes.md)。
 
 ```
 model-analyzer profile --model-repository /workspace/model_repository --profile-models text_recognition --triton-launch-mode=local --output-model-repository-path /workspace/output/ -f perf.yaml --override-output-model-repository --latency-budget 10 --run-config-search-mode quick
 ```
 
-Once the sweeps are done users can then use `report` to summarize the top configurations.
+扫描完成后，用户可以使用 `report` 汇总最佳配置。
 
 ```
 model-analyzer report --report-model-configs text_recognition_config_4,text_recognition_config_5,text_recognition_config_6 --export-path /workspace --config-file perf.yaml
 ```
 
-There are two types of reports which are generated:
-* Summaries
-* Detailed Reports
+生成的报告有两种类型：
+* 汇总报告（Summaries）
+* 详细报告（Detailed Reports）
 
-**Summaries** contain an overall results of all the best configurations. It has information about the hardware being used, the throughput vs latency curve, the GPU Memory vs latency curve and a table with performance numbers and other key information. By default, the sweep space is limited to a certain number of popular features like dynamic batching and multiple model instances, but users can expand the space with [model config parameters](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#model-config-parameters) to any features which can be specified in Triton's configuration files.
+**汇总报告**包含所有最佳配置的总体结果。它包含所用硬件的信息、吞吐 vs 延迟曲线、GPU 内存 vs 延迟曲线，以及一张包含性能数字和其他关键信息的表格。默认情况下，扫描空间被限制在一组常用特性上，如动态批处理和多个模型实例，但用户可以用[模型配置参数](https://github.com/triton-inference-server/model_analyzer/blob/main/docs/config.md#model-config-parameters)把扫描空间扩展到 Triton 配置文件中可以指定的任何特性。
+
 ![summary](./img/report_1.PNG)
 
-**Detailed Reports** breakdown the performance of each of the configurations. They contain more detailed performance charts describing the performance numbers for different loads.
+**详细报告**拆解每个配置的性能。它们包含更详细的性能图表，描述不同负载下的性能数字。
 
 ![summary](./img/report_2.PNG)
 
-Sample reports can be found in the `reports` folder.
+示例报告可以在 `reports` 文件夹中找到。
 
-# What's next?
+> 💡 **AI Infra 视角**：Model Analyzer 本质上做的是"自动化配置搜索"：把 instance 数、max_batch_size、dynamic batching 等参数组合成网格，自动拉起 Triton 跑 perf_analyzer 并收集指标。它解决的是生产里真实存在的痛点——配置空间太大、手工调参无法复现、不同模型的"最优配置"各不相同。做推理平台时，把它接入上线流程作为标准化的"性能体检"，比靠经验拍脑袋调参可靠得多。
 
-In this tutorial, we covered the use of Model Analyzer, which is a tool to select the best possible deployment configuration with respect to resource utilization. This is Part 3 of a 6 part tutorial series which covers the challenges faced in deploying Deep Learning models to production. Part 4 covers `Inference Accelerations`, which will talk about framework level optimizations to accelerate your models!
+# 接下来是什么？
+
+本教程我们讲了 Model Analyzer 的用法，它是一个根据资源利用率选择最佳部署配置的工具。这是 6 部分教程系列的第 3 部分，该系列讨论的是将深度学习模型部署到生产环境所面临的挑战。第 4 部分讲的是 `推理加速（Inference Acceleration）`，会介绍框架层面的优化来加速你的模型！

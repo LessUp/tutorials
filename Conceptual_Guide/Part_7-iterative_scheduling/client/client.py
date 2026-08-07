@@ -34,6 +34,8 @@ import tritonclient.grpc as grpcclient
 from print_utils import Display
 
 
+# 客户端 1 的回调：每次流式返回一个 token 就更新上方的进度条，
+# 收到最终响应（triton_final_response）时置位事件
 def client1_callback(display, event, result, error):
     if error:
         raise error
@@ -43,6 +45,7 @@ def client1_callback(display, event, result, error):
         event.set()
 
 
+# 客户端 2 的回调：与 client1 相同，更新下方的进度条
 def client2_callback(display, event, result, error):
     if error:
         raise error
@@ -52,8 +55,9 @@ def client2_callback(display, event, result, error):
         event.set()
 
 
+# 并发发起两条流式推理请求，用两个进度条直观展示 token 生成进度
 def run_inferences(url, model_name, display, max_tokens):
-    # Create clients
+    # 创建两个独立的 gRPC 客户端，分别发送两条不同的提示词
     client1 = grpcclient.InferenceServerClient(url)
     client2 = grpcclient.InferenceServerClient(url)
 
@@ -69,16 +73,18 @@ def run_inferences(url, model_name, display, max_tokens):
 
     event1 = threading.Event()
     event2 = threading.Event()
+    # 启动流式推理，注册回调函数
     client1.start_stream(callback=partial(partial(client1_callback, display), event1))
     client2.start_stream(callback=partial(partial(client2_callback, display), event2))
 
     while True:
-        # Reset the events
+        # 重置事件，准备新一轮推理
         event1.clear()
         event2.clear()
 
-        # Setup the display initially with the prompts
+        # 清空进度条显示
         display.clear()
+        # ignore_eos=True 表示即使模型输出 EOS 也继续生成（配合迭代调度演示）
         parameters = {"ignore_eos": True, "max_tokens": max_tokens}
 
         client1.async_stream_infer(
@@ -88,8 +94,7 @@ def run_inferences(url, model_name, display, max_tokens):
             parameters=parameters,
         )
 
-        # Add a small delay so that the two requests are not sent at the same
-        # time
+        # 加一点小延迟，让两条请求不要同一时刻到达服务器
         time.sleep(0.05)
         client2.async_stream_infer(
             model_name=model_name,
@@ -98,6 +103,7 @@ def run_inferences(url, model_name, display, max_tokens):
             parameters=parameters,
         )
 
+        # 等待两条请求都完成后，间隔 2 秒开始下一轮
         event1.wait()
         event2.wait()
         time.sleep(2)

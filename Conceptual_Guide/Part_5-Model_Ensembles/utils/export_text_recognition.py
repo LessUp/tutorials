@@ -29,15 +29,16 @@ from pathlib import Path
 import torch
 from model import STRModel
 
-# Create PyTorch Model Object
+# 创建 PyTorch 模型对象（单通道输入、512 维特征、37 类字符）
 model = STRModel(input_channels=1, output_channels=512, num_classes=37)
 
-# Load model weights from external file
+# 从外部文件加载模型权重
 state = torch.load("downloads/None-ResNet-None-CTC.pth")
+# 去掉权重名中的 "module." 前缀（DataParallel 训练产物的兼容处理）
 state = {key.replace("module.", ""): value for key, value in state.items()}
 model.load_state_dict(state)
 
-# Create ONNX file by tracing model
+# 通过 trace 方式把 PyTorch 模型导出为 ONNX 文件
 model_directory = Path("model_repository/text_recognition/1/")
 model_directory.mkdir(parents=True, exist_ok=True)
 trace_input = torch.randn(1, 1, 32, 100)
@@ -46,5 +47,6 @@ torch.onnx.export(
     trace_input,
     model_directory / "model.onnx",
     verbose=True,
+    # 把输入和输出的第 0 维声明为动态维度，这样 Triton 才能对多个请求合批
     dynamic_axes={"input.1": [0], "308": [0]},
 )

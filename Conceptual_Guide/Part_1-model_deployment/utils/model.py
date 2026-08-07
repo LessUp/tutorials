@@ -19,17 +19,20 @@ import torch.nn as nn
 # from modules.feature_extraction import ResNet_FeatureExtractor
 
 
+# 特征提取器：用 ResNet 骨干网络从输入图片提取视觉特征
 class ResNet_FeatureExtractor(nn.Module):
     """FeatureExtractor of FAN (http://openaccess.thecvf.com/content_ICCV_2017/papers/Cheng_Focusing_Attention_Towards_ICCV_2017_paper.pdf)"""
 
     def __init__(self, input_channel, output_channel=512):
         super(ResNet_FeatureExtractor, self).__init__()
+        # 按 [1, 2, 5, 3] 的层数分布构建 4 个残差阶段
         self.ConvNet = ResNet(input_channel, output_channel, BasicBlock, [1, 2, 5, 3])
 
     def forward(self, input):
         return self.ConvNet(input)
 
 
+# ResNet 的基本残差块：两个 3x3 卷积 + 跳跃连接（shortcut）
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -40,6 +43,7 @@ class BasicBlock(nn.Module):
         self.conv2 = self._conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes)
         self.relu = nn.ReLU(inplace=True)
+        # downsample 用于输入输出通道数不一致时对齐残差分支
         self.downsample = downsample
         self.stride = stride
 
@@ -49,6 +53,7 @@ class BasicBlock(nn.Module):
             in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
         )
 
+    # 前向：conv1 → bn1 → relu → conv2 → bn2，再加上残差并激活
     def forward(self, x):
         residual = x
 
@@ -67,6 +72,7 @@ class BasicBlock(nn.Module):
         return out
 
 
+# 简化版 ResNet：多阶段下采样提取特征，适合文字识别这类序列化视觉任务
 class ResNet(nn.Module):
     def __init__(self, input_channel, output_channel, block, layers):
         super(ResNet, self).__init__()
@@ -161,6 +167,7 @@ class ResNet(nn.Module):
         )
         self.bn4_2 = nn.BatchNorm2d(self.output_channel_block[3])
 
+    # 构建一个由多个残差块组成的 stage；通道数变化时自动生成 1x1 卷积下采样分支
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
@@ -220,6 +227,7 @@ class ResNet(nn.Module):
         return x
 
 
+# 整体文字识别模型（STRModel）：特征提取 → 序列建模 → 逐位置字符分类
 class STRModel(nn.Module):
     def __init__(self, input_channels, output_channels, num_classes):
         super(STRModel, self).__init__()
@@ -227,14 +235,17 @@ class STRModel(nn.Module):
             input_channels, output_channels
         )
         self.FeatureExtraction_output = output_channels  # int(imgH/16-1) * 512
+        # 自适应平均池化：把高度方向压成 1，保留宽度方向作为序列长度
         self.AdaptiveAvgPool = nn.AdaptiveAvgPool2d(
             (self.FeatureExtraction_output, 1)
         )  # Transform final (imgH/16-1) -> 1
         self.SequenceModeling_output = self.FeatureExtraction_output
+        # 分类头：对每个序列位置输出 num_classes 个类别的概率
         self.Prediction = nn.Linear(self.SequenceModeling_output, num_classes)
 
     def forward(self, input):
         """Feature extraction stage"""
+        # 特征提取阶段
         visual_feature = self.FeatureExtraction(input)
         visual_feature = self.AdaptiveAvgPool(
             visual_feature.permute(0, 3, 1, 2)
@@ -242,6 +253,7 @@ class STRModel(nn.Module):
         visual_feature = visual_feature.squeeze(3)
 
         """ Prediction stage """
+        # 预测阶段：对每个时间步（宽度位置）做字符分类
         prediction = self.Prediction(visual_feature.contiguous())
 
         return prediction

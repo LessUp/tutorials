@@ -38,11 +38,14 @@ import numpy as np
 import triton_python_backend_utils as pb_utils
 
 
+# 检测后处理模型：把 EAST 的分数/几何输出解码成边界框并裁剪出文字区域，
+# 作为文本识别模型的输入（原 Part 1 客户端逻辑，现在在服务端执行）
 class TritonPythonModel:
     """Your Python model must use the same class name. Every Python model
     that is created must have "TritonPythonModel" as the class name.
     """
 
+    # 模型加载时调用一次（可选）：解析 model_config，准备输出数据类型
     def initialize(self, args):
         """`initialize` is called only once when the model is being loaded.
         Implementing `initialize` function is optional. This function allows
@@ -59,15 +62,15 @@ class TritonPythonModel:
           * model_name: Model name
         """
 
-        # You must parse model_config. JSON string is not parsed here
+        # 必须解析 model_config（JSON 字符串，需要手动解析）
         model_config = json.loads(args["model_config"])
 
-        # Get OUTPUT0 configuration
+        # 取出输出张量的配置
         output0_config = pb_utils.get_output_config_by_name(
             model_config, "detection_postprocessing_output"
         )
 
-        # Convert Triton types to numpy types
+        # 把 Triton 数据类型转换成 numpy 类型
         self.output0_dtype = pb_utils.triton_string_to_numpy(
             output0_config["data_type"]
         )
@@ -96,6 +99,7 @@ class TritonPythonModel:
 
         responses = []
 
+        # 根据旋转矩形的 4 个顶点做透视变换，把文字区域矫正为 (100, 32) 的规整图
         def fourPointsTransform(frame, vertices):
             vertices = np.asarray(vertices)
             outputSize = (100, 32)
@@ -113,11 +117,13 @@ class TritonPythonModel:
             result = cv2.warpPerspective(frame, rotationMatrix, outputSize)
             return result
 
+        # 把 EAST 输出的每个像素的分数与几何信息解码为文字边界框
         def decodeBoundingBoxes(scores, geometry, scoreThresh=0.5):
             detections = []
             confidences = []
 
             ############ CHECK DIMENSIONS AND SHAPES OF geometry AND scores ############
+            # 校验输入张量的维度形状是否符合 EAST 输出约定
             assert len(scores.shape) == 4, "Incorrect dimensions of scores"
             assert len(geometry.shape) == 4, "Incorrect dimensions of geometry"
             assert scores.shape[0] == 1, "Invalid dimensions of scores"
@@ -133,7 +139,7 @@ class TritonPythonModel:
             height = scores.shape[2]
             width = scores.shape[3]
             for y in range(0, height):
-                # Extract data from scores
+                # 逐像素取出分数与文本框几何参数（四边距离 + 旋转角）
                 scoresData = scores[0][0][y]
                 x0_data = geometry[0][0][y]
                 x1_data = geometry[0][1][y]
@@ -143,11 +149,11 @@ class TritonPythonModel:
                 for x in range(0, width):
                     score = scoresData[x]
 
-                    # If score is lower than threshold score, move to next x
+                    # 分数低于阈值则跳过，不生成候选框
                     if score < scoreThresh:
                         continue
 
-                    # Calculate offset
+                    # 计算偏移：EAST 特征图相对原图是 4 倍下采样，坐标需乘 4 还原
                     offsetX = x * 4.0
                     offsetY = y * 4.0
                     angle = anglesData[x]
@@ -174,10 +180,9 @@ class TritonPythonModel:
             # Return detections and confidences
             return [detections, confidences]
 
-        # Every Python backend must iterate over everyone of the requests
-        # and create a pb_utils.InferenceResponse for each of them.
+        # 遍历所有请求，为每条请求构造一个响应
         for request in requests:
-            # Get INPUT0
+            # 取出三个输入张量：分数、几何信息、预处理后的原图
             in_1 = pb_utils.get_input_tensor_by_name(
                 request, "detection_postprocessing_input_1"
             )
@@ -188,6 +193,7 @@ class TritonPythonModel:
                 request, "detection_postprocessing_input_3"
             )
 
+            # 调整维度顺序后解码边界框，再做 NMS 去掉重叠的检测框
             scores = in_1.as_numpy().transpose(0, 3, 1, 2)
             geometry = in_2.as_numpy().transpose(0, 3, 1, 2)
             frame = np.squeeze(in_3.as_numpy(), axis=0)
@@ -199,7 +205,7 @@ class TritonPythonModel:
             cv2.imwrite("frame.png", frame)
             count = 0
             for i in indices:
-                # get 4 corners of the rotated rect
+                # 取旋转矩形的 4 个角点，矫正为规整图并转灰度，归一化到 [-1, 1]
                 count += 1
                 vertices = cv2.boxPoints(boxes[i])
                 cropped = fourPointsTransform(frame, vertices)

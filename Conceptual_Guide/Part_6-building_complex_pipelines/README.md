@@ -26,27 +26,28 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Building Complex Pipelines: Stable Diffusion
+# 构建复杂流水线：Stable Diffusion
 
-| Navigate to | [Part 5: Building Model Ensembles](../Part_5-Model_Ensembles/) | [Part 7: Iterative Scheduling Tutorial](../Part_7-iterative_scheduling) | [Documentation: BLS](https://github.com/triton-inference-server/python_backend#business-logic-scripting) |
+| 跳转到 | [第 5 部分：构建模型集成](../Part_5-Model_Ensembles/) | [第 7 部分：迭代调度教程](../Part_7-iterative_scheduling) | [文档：BLS](https://github.com/triton-inference-server/python_backend#business-logic-scripting) |
 | ------------ | --------------- | --------------- |  --------------- |
 
-**Watch [this explainer video](https://youtu.be/JgP2WgNIq_w) with discusses the pipeline, before proceeding with the example**. This example focuses on showcasing two of Triton Inference Server's features:
-* Using multiple frameworks in the same inference pipeline. Refer [this for more information](https://github.com/triton-inference-server/backend#where-can-i-find-all-the-backends-that-are-available-for-triton) about supported frameworks.
-* Using the Python Backend's [Business Logic Scripting](https://github.com/triton-inference-server/python_backend#business-logic-scripting) API to build complex non linear pipelines.
+**开始本示例之前，请先观看[这个讲解视频](https://youtu.be/JgP2WgNIq_w)了解这条流水线**。本示例重点展示 Triton Inference Server 的两个特性：
+* 在同一个推理流水线中使用多个框架。关于受支持框架的更多信息，请[参考这里](https://github.com/triton-inference-server/backend#where-can-i-find-all-the-backends-that-are-available-for-triton)。
+* 使用 Python Backend 的[业务逻辑脚本（Business Logic Scripting）](https://github.com/triton-inference-server/python_backend#business-logic-scripting)API 构建复杂的非线性流水线。
 
-## Using Multiple Backends
+## 使用多个 Backend
 
-Building a pipeline powered by deep learning models is a collaborative effort which often involves multiple contributors. Contributors often have differing development environment. This can lead to issues whilst building a single pipeline with work from different contributors. Triton users can solve this challenge with the use of the Python or a C++ backend along with the Business Logic Scripting API (BLS) API to trigger model execution.
+构建一条由深度学习模型驱动的流水线是一项协作工作，常常涉及多个贡献者。贡献者往往有不同的开发环境。把不同贡献者的工作拼进同一条流水线时，这可能导致问题。Triton 用户可以使用 Python 或 C++ backend 配合业务逻辑脚本 API（BLS）来触发模型执行，从而解决这个难题。
 
 ![Pipeline](./img/multiple_backends.PNG)
 
-In this example, the models are being run on:
+在本示例中，模型运行在：
 * ONNX Backend
 * TensorRT Backend
 * Python Backend
 
-Both the models deployed on a framework backend can be triggered using the following API:
+部署在框架 backend 上的两个模型都可以用下面的 API 触发：
+
 ```
 encoding_request = pb_utils.InferenceRequest(
     model_name="text_encoder",
@@ -58,19 +59,21 @@ response = encoding_request.exec()
 text_embeddings = pb_utils.get_output_tensor_by_name(response, "last_hidden_state")
 ```
 
-Refer to `model.py` in the `pipeline` model for a complete example.
+> 💡 **AI Infra 视角**：BLS 的本质是在 Triton 内部"再发一次推理请求"——它让 Python backend 里的代码可以像客户端一样调用其他模型。生产中的典型用法：把路由逻辑（根据请求内容决定调哪个模型）、多模型投票、流式处理等放进 BLS，客户端就只看到一个模型。代价是 BLS 脚本是热点路径，要像对待线上服务一样对待它的性能。
 
-## Stable Diffusion Example
+完整的示例请参考 `pipeline` 模型中的 `model.py`。
 
-Before starting, clone this repository and navigate to the root folder. Use three different terminals for an easier user experience.
+## Stable Diffusion 示例
 
-### Step 1: Prepare the Server Environment
-* First, run the Triton Inference Server Container.
+开始之前，克隆本仓库并进入根目录。为了更好的体验，请使用三个不同的终端。
+
+### 第 1 步：准备服务器环境
+* 首先，运行 Triton Inference Server 容器。
 ```
 # Replace yy.mm with year and month of release. Eg. 22.08
 docker run --gpus=all -it --shm-size=256m --rm -p8000:8000 -p8001:8001 -p8002:8002 -v ${PWD}:/workspace/ -v ${PWD}/model_repository:/models nvcr.io/nvidia/tritonserver:yy.mm-py3 bash
 ```
-* Next, install all the dependencies required by the models running in the python backend and login with your [huggingface token](https://huggingface.co/settings/tokens)(Account on [HuggingFace](https://huggingface.co/) is required).
+* 接下来，安装 python backend 中模型运行所需的所有依赖，并用你的 [huggingface token](https://huggingface.co/settings/tokens) 登录（需要有 [HuggingFace](https://huggingface.co/) 账号）。
 
 ```
 # PyTorch & Transformers Lib
@@ -81,8 +84,8 @@ pip install transformers[onnxruntime]
 huggingface-cli login
 ```
 
-### Step 2: Exporting and converting the models
-Use the NGC PyTorch container, to export and convert the models.
+### 第 2 步：导出并转换模型
+使用 NGC PyTorch 容器导出和转换模型。
 
 ```
 docker run -it --gpus all -p 8888:8888 -v ${PWD}:/mount nvcr.io/nvidia/pytorch:yy.mm-py3
@@ -104,14 +107,16 @@ mv vae.plan model_repository/vae/1/model.plan
 mv encoder.onnx model_repository/text_encoder/1/model.onnx
 ```
 
-### Step 3: Launch the Server
-From the server container, launch the Triton Inference Server.
+### 第 3 步：启动服务器
+在服务器容器中启动 Triton Inference Server。
+
 ```
 tritonserver --model-repository=/models
 ```
 
-### Step 4: Run the client
-Use the client container and run the client.
+### 第 4 步：运行客户端
+使用客户端容器并运行客户端。
+
 ```
 docker run -it --net=host -v ${PWD}:/workspace/ nvcr.io/nvidia/tritonserver:yy.mm-py3-sdk bash
 
@@ -122,4 +127,7 @@ python3 client.py
 pip install gradio packaging
 python3 gui/client.py --triton_url="localhost:8001"
 ```
-Note: First Inference query may take more time than successive queries
+
+注意：首次推理查询可能比后续查询耗时更长。
+
+> 💡 **AI Infra 视角**：这个示例是"多引擎流水线"的典型模板：text_encoder 用 ONNX、VAE 用 TensorRT（因为 VAE 是纯卷积网络，TensorRT 加速收益大）、扩散调度循环用 Python BLS 编排。它展示了 Triton 的定位优势——不需要把整条链路都塞进一个框架。做生产部署时，"哪个模型适合哪个引擎"通常要按实测性能决定，而不是一刀切。

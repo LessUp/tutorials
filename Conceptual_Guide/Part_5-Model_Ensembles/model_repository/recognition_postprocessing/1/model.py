@@ -35,11 +35,13 @@ import numpy as np
 import triton_python_backend_utils as pb_utils
 
 
+# 识别后处理模型：把文本识别模型的字符概率张量解码成最终字符串（CTC 解码）
 class TritonPythonModel:
     """Your Python model must use the same class name. Every Python model
     that is created must have "TritonPythonModel" as the class name.
     """
 
+    # 模型加载时调用一次（可选）：解析 model_config，准备输出数据类型
     def initialize(self, args):
         """`initialize` is called only once when the model is being loaded.
         Implementing `initialize` function is optional. This function allows
@@ -56,15 +58,15 @@ class TritonPythonModel:
           * model_name: Model name
         """
 
-        # You must parse model_config. JSON string is not parsed here
+        # 必须解析 model_config（JSON 字符串，需要手动解析）
         model_config = json.loads(args["model_config"])
 
-        # Get OUTPUT0 configuration
+        # 取出输出张量的配置
         output0_config = pb_utils.get_output_config_by_name(
             model_config, "recognition_postprocessing_output"
         )
 
-        # Convert Triton types to numpy types
+        # 把 Triton 数据类型转换成 numpy 类型
         self.output0_dtype = pb_utils.triton_string_to_numpy(
             output0_config["data_type"]
         )
@@ -93,6 +95,7 @@ class TritonPythonModel:
 
         responses = []
 
+        # CTC 解码：对每个时间步取概率最大的类别，映射回字符
         def decodeText(scores):
             text = ""
             alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -103,17 +106,16 @@ class TritonPythonModel:
                 else:
                     text += "-"
 
-            # adjacent same letters as well as background text must be removed to get the final output
+            # 去掉相邻重复字符以及表示空白/背景的 "-"，得到最终文本
             char_list = []
             for i in range(len(text)):
                 if text[i] != "-" and (not (i > 0 and text[i] == text[i - 1])):
                     char_list.append(text[i])
             return "".join(char_list)
 
-        # Every Python backend must iterate over everyone of the requests
-        # and create a pb_utils.InferenceResponse for each of them.
+        # 遍历所有请求，为每条请求构造一个响应
         for request in requests:
-            # Get INPUT0
+            # 取出识别模型的概率输出，批量解码每张裁剪图的文本
             in_1 = pb_utils.get_input_tensor_by_name(
                 request, "recognition_postprocessing_input"
             ).as_numpy()

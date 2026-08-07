@@ -39,11 +39,14 @@ import triton_python_backend_utils as pb_utils
 from PIL import Image
 
 
+# Python backend 模型入口：类名必须是 TritonPythonModel，
+# 把图片解码 + 缩放归一化的前处理从客户端搬到 Triton 服务端执行
 class TritonPythonModel:
     """Your Python model must use the same class name. Every Python model
     that is created must have "TritonPythonModel" as the class name.
     """
 
+    # 模型加载时调用一次（可选）：解析 model_config，准备输出数据类型
     def initialize(self, args):
         """`initialize` is called only once when the model is being loaded.
         Implementing `initialize` function is optional. This function allows
@@ -60,15 +63,15 @@ class TritonPythonModel:
           * model_name: Model name
         """
 
-        # You must parse model_config. JSON string is not parsed here
+        # 必须解析 model_config（这里拿到的是 JSON 字符串，需要手动解析）
         model_config = json.loads(args["model_config"])
 
-        # Get OUTPUT0 configuration
+        # 从模型配置中取出输出张量的配置
         output0_config = pb_utils.get_output_config_by_name(
             model_config, "detection_preprocessing_output"
         )
 
-        # Convert Triton types to numpy types
+        # 把 Triton 数据类型转换成对应的 numpy 类型，供输出张量使用
         self.output0_dtype = pb_utils.triton_string_to_numpy(
             output0_config["data_type"]
         )
@@ -97,14 +100,15 @@ class TritonPythonModel:
 
         responses = []
 
-        # Every Python backend must iterate over everyone of the requests
-        # and create a pb_utils.InferenceResponse for each of them.
+        # 每个 Python backend 都必须遍历所有请求，
+        # 并为每一条请求构造一个 pb_utils.InferenceResponse
         for request in requests:
-            # Get INPUT0
+            # 从请求中按名称取出输入张量（集成模型传入的原始图片字节）
             in_0 = pb_utils.get_input_tensor_by_name(
                 request, "detection_preprocessing_input"
             )
 
+            # 图片加载器：裁剪到 32 的倍数尺寸并转为张量（对齐模型输入约束）
             def image_loader(image):
                 [h, w] = image.size
                 resize_w = (w // 32) * 32
@@ -121,10 +125,12 @@ class TritonPythonModel:
 
             img = in_0.as_numpy()
 
+            # 把输入字节解码成 PIL 图片，再走前处理流水线并还原 0-255 数值范围
             image = Image.open(io.BytesIO(img.tobytes()))
             img_out = image_loader(image)
             img_out = np.array(img_out) * 255.0
 
+            # 构造输出张量，名称与 config.pbtxt 中定义的输出一致
             out_tensor_0 = pb_utils.Tensor(
                 "detection_preprocessing_output", img_out.astype(output0_dtype)
             )
@@ -140,10 +146,10 @@ class TritonPythonModel:
                 output_tensors=[out_tensor_0]
             )
             responses.append(inference_response)
-        # You should return a list of pb_utils.InferenceResponse. Length
-        # of this list must match the length of `requests` list.
+        # 返回的响应列表长度必须与请求列表一致
         return responses
 
+    # 模型卸载时调用一次（可选）：做一些清理工作
     def finalize(self):
         """`finalize` is called only once when the model is being unloaded.
         Implementing `finalize` function is OPTIONAL. This function allows
