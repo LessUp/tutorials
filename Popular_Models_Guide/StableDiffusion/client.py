@@ -36,36 +36,46 @@ from tqdm import tqdm
 from tritonclient.utils import *
 
 
+# 单个客户端进程的执行体：向 Triton 发送指定数量的请求，统计吞吐与平均延迟。
+# 每个请求可携带 batch_size 个提示词（对应服务的静态批大小）。
 def client(model, request_count, prompt, batch_size, save_image, index):
+    # 通过 HTTP 协议连接本机 8000 端口的 Triton Inference Server
     client = httpclient.InferenceServerClient(url="localhost:8000")
     latencies = []
     start = time.time()
     for i in tqdm(range(request_count), position=index):
         prompts = [prompt] * batch_size
 
+        # 文本输入需封装为二维 object 数组，形状为 (batch_size, 1)
         text_obj = np.array(prompts, dtype="object").reshape((-1, 1))
 
+        # 构造 Triton 输入张量：名称为 "prompt"，类型由 numpy dtype 自动映射
         input_text = httpclient.InferInput(
             "prompt", text_obj.shape, np_to_triton_dtype(text_obj.dtype)
         )
         input_text.set_data_from_numpy(text_obj)
 
+        # 声明期望的输出张量 "generated_image"
         output_img = httpclient.InferRequestedOutput("generated_image")
         request_start = time.time()
+        # 发起同步推理请求
         query_response = client.infer(
             model_name=model, inputs=[input_text], outputs=[output_img]
         )
         latencies.append(time.time() - request_start)
         image = query_response.as_numpy("generated_image")
+        # 按客户端编号和请求序号保存生成的图片为 jpeg 文件
         if save_image:
             im = Image.fromarray(np.squeeze(image.astype(np.uint8)))
             im.save(f"client_{index}_generated_image_{i}.jpg")
+    # 打印本客户端的吞吐（请求数/秒）与平均延迟
     print(
         f"Client: {index} Throughput: {request_count/(time.time()-start)} Avg. Latency: {np.mean(latencies)}"
     )
 
 
 if __name__ == "__main__":
+    # 命令行参数：并发客户端数、每客户端请求数、批大小、提示词、是否存图等
     parser = argparse.ArgumentParser(
         description="Example client demonstrating sending prompts to generative AI models",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -105,6 +115,7 @@ if __name__ == "__main__":
         "--model", type=str, default="stable_diffusion_xl", help="model name"
     )
     args = parser.parse_args()
+    # 可选：后台启动 nvidia-smi dmon 记录 GPU 利用率，用于观察压测期间的硬件状态
     if args.launch_nvidia_smi:
         nvidia_smi_proc = subprocess.Popen(
             ["nvidia-smi", "dmon", "-f", "nvidia_smi_output.txt"]
@@ -112,6 +123,7 @@ if __name__ == "__main__":
         time.sleep(5)
     procs = []
     start_time = time.time()
+    # 每个客户端启动一个独立进程，并行地向服务器发请求，模拟多用户并发
     for i in range(args.clients):
         procs.append(
             Process(
@@ -128,6 +140,7 @@ if __name__ == "__main__":
         )
         procs[-1].start()
 
+    # 等待所有客户端进程结束后，汇总整体吞吐与总耗时
     for proc in procs:
         proc.join()
     end_time = time.time()

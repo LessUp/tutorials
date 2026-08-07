@@ -34,15 +34,22 @@ from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer
 
 
+# Triton Python 后端入口类：编排 Llava1.5 的多模态推理流程。
+# 它先调用同仓库下的 vision_encoder 子模型提取图片特征，
+# 再把特征作为视觉 token 嵌入提示词，交给 tensorrt_llm 模型做文本生成（即 BLS 编排模式）。
 class TritonPythonModel:
+    # 生命周期钩子：模型加载时调用，从 HF_LOCATION 环境变量指向的目录加载图像处理器与分词器
     def initialize(self, args):
+        # 环境变量未设置时回退到模型目录
         HF_LOCATION = os.getenv("HF_LOCATION", pb_utils.get_model_dir())
         self.image_processor = AutoProcessor.from_pretrained(HF_LOCATION)
         self.logger = pb_utils.Logger
         self.tokenizer = AutoTokenizer.from_pretrained(HF_LOCATION)
+        # Llava1.5 的词表大小为 32064；视觉 token 从词表末尾之后开始编号，避免与文本 token 冲突
         self.vocab_size = 32064
         self.max_input_len = 2048
 
+    # 把提示词按 <image> 占位符切分，中间插入 num_visual_tokens 个视觉 token 的 ID 区间
     def _tokenize(self, prompt, num_visual_tokens):
         chunks = prompt.split("<image>")
         assert len(chunks) == 2, "Only support exactly one image per prompt"
@@ -53,6 +60,7 @@ class TritonPythonModel:
             + self.tokenizer.encode(chunks[1])[self.tokenizer.add_bos_token :]
         )
 
+    # 从请求中按名称读取输入张量；请求未携带该输入时返回默认值
     def _parse_input(self, request, input_name, default=None):
         input = pb_utils.get_input_tensor_by_name(request, input_name)
         if input is not None:
@@ -60,6 +68,7 @@ class TritonPythonModel:
 
         return default
 
+    # 提取图片特征：下载图片并调用 vision_encoder 子模型（详见下方 docstring）
     def _extract_image_features(self, image, prompt):
         """
         Extracts features from an image using a vision encoder model. This
@@ -83,11 +92,13 @@ class TritonPythonModel:
         - torch.Tensor: A tensor containing the extracted image features.
         """
 
+        # 从 URL 流式下载图片并转为 RGB
         pil_image = Image.open(rq.get(image, stream=True).raw).convert("RGB")
+        # 用 AutoProcessor 把图片预处理成模型期望的像素张量（float16 以省显存）
         image = self.image_processor(
             text=prompt, images=pil_image, return_tensors="np"
         )["pixel_values"].astype(np.float16)
-        # Create inference request object
+        # 构造对 vision_encoder 子模型的 BLS 推理请求（同服务器内调用，不走网络）
         infer_request = pb_utils.InferenceRequest(
             model_name="vision_encoder",
             requested_output_names=["features"],
@@ -97,6 +108,7 @@ class TritonPythonModel:
         image_features = pb_utils.get_output_tensor_by_name(vision_response, "features")
         return torch.from_dlpack(image_features.as_numpy())
 
+    # 组装传给 tensorrt_llm 模型的输入：文本 token、采样参数与图片特征（详见下方 docstring）
     def _prepare_llm_inputs(self, request, image_features, prompt):
         """
         Prepares inputs for the language model based on the parameters in the
@@ -122,6 +134,7 @@ class TritonPythonModel:
         -------
         - dict: A dictionary containing all the prepared inputs for the language model.
         """
+        # 生成含视觉 token 的完整 token 序列，并做输入长度上限校验
         input_ids = self._tokenize(prompt, len(image_features[0]))
         input_ids = np.array(input_ids, dtype=np.int32)
         input_len = input_ids.shape[0]
@@ -129,11 +142,14 @@ class TritonPythonModel:
             return pb_utils.TritonError(
                 f"Input length ({input_len:d}) exceeds limit ({self.max_input_len:d})"
             )
+        # 从请求中读取采样参数（缺失时用默认值）
         max_tokens = self._parse_input(request, "max_tokens", default=50)
         temperature = self._parse_input(request, "temperature", default=0.5)
         top_k = self._parse_input(request, "top_k", default=1)
         frequency_penalty = self._parse_input(request, "frequency_penalty", default=0.7)
         seed = self._parse_input(request, "seed", default=10)
+        # 视觉特征通过 prompt_embedding_table 传给 TRT-LLM：
+        # 视觉 token 的嵌入由该表直接提供，而非词表查找——这是多模态接入 LLM 的通用机制
         embedding_args = {
             "prompt_vocab_size": np.array(
                 [[image_features[0].shape[0]]], dtype=np.uint32
@@ -143,6 +159,7 @@ class TritonPythonModel:
             ),
         }
 
+        # 组装 TRT-LLM 期望的输入字典：形状统一为 (1, 1) 或 (1, 特征数)
         return {
             "input_ids": np.expand_dims(input_ids, 0),
             "input_lengths": np.array([[input_len]], dtype=np.int32),
@@ -156,6 +173,7 @@ class TritonPythonModel:
             **embedding_args,
         }
 
+    # 把输入发给 tensorrt_llm 模型做流式生成，并聚合成最终响应（详见下方 docstring）
     def _prepare_llm_response(self, llm_request_inputs):
         """
         Prepares the response from the language model based on the provided
@@ -181,6 +199,8 @@ class TritonPythonModel:
         -------
         - pb_utils.InferenceResponse: The response object containing the generated text and additional metadata.
         """
+        # 向 tensorrt_llm 模型发起 BLS 请求；decoupled=True 开启解耦（流式）模式，
+        # exec 会逐次返回每个流式片段
         llm_request = pb_utils.InferenceRequest(
             model_name="tensorrt_llm",
             requested_output_names=["output_ids", "sequence_length"],
@@ -192,12 +212,14 @@ class TritonPythonModel:
         for llm_response in llm_request.exec(decoupled=True):
             if llm_response.has_error():
                 raise pb_utils.TritonModelException(llm_response.error().message())
+            # 取出本片段的输出 token ID
             stream_output_ids = (
                 pb_utils.get_output_tensor_by_name(llm_response, "output_ids")
                 .as_numpy()
                 .flatten()
                 .tolist()
             )
+            # 判定结束原因：出现 EOS 记号或生成到最大长度
             finish_reason = ""
             if len(stream_output_ids) == 0 or (
                 len(stream_output_ids) != 0
@@ -211,6 +233,7 @@ class TritonPythonModel:
             last_response = finish_reason != ""
             output_len = len(output_ids)
             if last_response:
+                # 结束：把 token 解码成文本，构造带统计信息的最终响应
                 output_text = self.tokenizer.decode(output_ids).strip()
                 response = pb_utils.InferenceResponse(
                     output_tensors=[
@@ -237,9 +260,13 @@ class TritonPythonModel:
                 return response
         return None
 
+    # 推理主入口：逐个处理请求，串起"提特征 → 组输入 → LLM 生成"三步。
+    # 使用解耦（decoupled）响应发送方式，通过 response_sender 异步回传结果
     def execute(self, requests):
         for request in requests:
+            # 获取与请求绑定的响应发送器（解耦模式要求显式发送并标记最终响应）
             response_sender = request.get_response_sender()
+            # 读取图片输入：可以是 URL 字符串，也可能是 gRPC 传输后的 bytes，统一解码
             image = (
                 pb_utils.get_input_tensor_by_name(request, "image")
                 .as_numpy()
@@ -252,21 +279,20 @@ class TritonPythonModel:
             prompt = pb_utils.get_input_tensor_by_name(request, "prompt").as_numpy()[0]
             if isinstance(prompt, bytes):
                 prompt = prompt.decode("utf-8")
-            # Step 1. Process received image URL to load a raw image and pass
-            # it to `vision_encoder` model to extract image features.
+            # Step 1. 加载图片并调用 vision_encoder 子模型提取图像特征
             image_features = self._extract_image_features(image, prompt)
-            # Step 2. Combine image features with the prompt and the rest of
-            # parameters, passed in the request.
+            # Step 2. 把图像特征、提示词与请求中的采样参数组合成 LLM 输入
             llm_request_inputs = self._prepare_llm_inputs(
                 request, image_features, prompt
             )
+            # 输入超长时直接以错误响应结束，不再调用 LLM
             if isinstance(llm_request_inputs, pb_utils.TritonError):
                 error = pb_utils.InferenceResponse(error=llm_request_inputs)
                 response_sender.send(
                     error, flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL
                 )
                 return
-            # Step 3. Pass prepared llm inputs to Llava 1.5 TensorRT model.
+            # Step 3. 把组装好的输入交给 tensorrt_llm 模型生成文本
             llm_response = self._prepare_llm_response(llm_request_inputs)
             if llm_response is not None:
                 response_sender.send(

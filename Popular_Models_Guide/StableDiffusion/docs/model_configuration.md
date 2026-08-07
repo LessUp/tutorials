@@ -26,24 +26,23 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Stable Diffusion Model Configuration Options
+# Stable Diffusion 模型配置选项
 
-The example python based backend
-[`/backend/diffusion/model.py`](../backend/diffusion/model.py) supports
-the following configuration parameters to customize the model being served.
+示例 Python 后端
+[`/backend/diffusion/model.py`](../backend/diffusion/model.py)
+支持下列配置参数，用于定制所服务的模型。
 
-## Full Configuration Examples
+## 完整配置示例
 
    * [Stable Diffusion v1.5](../diffusion-models/stable_diffusion_1_5/config.pbtxt)
    * [Stable Diffusion XL](../diffusion-models/stable_diffusion_xl/config.pbtxt)
 
-## Batch Size and Dynamic Batching
+## 批大小与动态批处理
 
-You can select the batch size and dynamic batching queue delay. With
-batch size 1 dynamic batching is disabled.
+你可以设置批大小（batch size）和动态批处理（dynamic batching）的排队延迟。批大小为 1 时动态批处理会被禁用。
 
 > [!Note]
-> Changing the batch size requires rebuilding the TensorRT Engines
+> 修改批大小需要重新构建 TensorRT 引擎
 
 
 ```bash
@@ -55,12 +54,13 @@ dynamic_batching {
 
 ```
 
-## Engine Building Parameters
+> 💡 **AI Infra 视角**：动态批处理（dynamic batching）是 Triton 提升吞吐的核心机制：多个到达时刻不同的请求会在队列里短暂攒批，凑满 `max_batch_size` 或等够 `max_queue_delay_microseconds`（最大排队延迟）后一次性送进引擎执行。批越大，GPU 利用率越高，但攒批会引入额外的排队延迟——这个"攒批时间 vs 批大小"的权衡是调优吞吐时的核心旋钮。需要注意扩散模型这类引擎是按固定批大小编译的，改批大小必须重新构建引擎。
 
-The following configuration parameters affect the engine build.
+## 引擎构建参数
 
-Please see the [TensorRT demo](https://github.com/NVIDIA/TensorRT/tree/release/9.2/demo/Diffusion)
-for more information.
+下面的配置参数会影响引擎构建。
+
+更多信息请参考 [TensorRT demo](https://github.com/NVIDIA/TensorRT/tree/release/9.2/demo/Diffusion)。
 
 ```
 {
@@ -89,10 +89,11 @@ for more information.
 }
 ```
 
-## Forcing Engine Build
+> 💡 **AI Infra 视角**：`onnx_opset`（ONNX 算子集版本）决定导出 ONNX 时使用哪个版本的算子规范；`image_height`/`image_width` 则决定了引擎编译时锁定的图像尺寸。这些参数在构建期就固化进了引擎——意味着部署时若想换分辨率或换导出格式，只能重新构建引擎，而不是改个运行时配置就能生效。设计模型服务 API 时，最好把这类"编译期参数"和"运行时参数"（如 `steps`）明确分开。
 
-Setting the following parameter to a non empty value will force an
-engine rebuild.
+## 强制重建引擎
+
+将下面的参数设为非空值会强制重新构建引擎。
 
 ```
 {
@@ -103,14 +104,12 @@ engine rebuild.
 }
 ```
 
-## Runtime Settings
+## 运行时设置
 
-The following configuration parameters affect the runtime behavior of the model.
-Please see the [TensorRT demo](https://github.com/NVIDIA/TensorRT/tree/release/9.2/demo/Diffusion)
-for more information.
+下面的配置参数影响模型的运行时行为。
+更多信息请参考 [TensorRT demo](https://github.com/NVIDIA/TensorRT/tree/release/9.2/demo/Diffusion)。
 
-Setting a non null integer value for `seed` will result in
-deterministic results.
+为 `seed` 设置一个非空的整数值会得到确定性的结果。
 
 ```
 {
@@ -138,3 +137,5 @@ deterministic results.
   }
 }
 ```
+
+> 💡 **AI Infra 视角**：`steps`（去噪步数）和 `guidance_scale`（引导强度）是扩散模型两个最影响成本与效果的参数：步数越多、引导越强，生成质量越好，但推理延迟几乎线性上升。生产服务通常把步数做成用户可选的档位（如快速/标准/精细），并在服务端限制上限，防止个别用户把 GPU 资源吃满。`seed` 置空表示每次随机，固定则可复现结果，方便做回归测试和效果对比。

@@ -25,33 +25,28 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
-# Deploying DeepSeek-R1-Distill-Llama-8B model with Triton
+# 使用 Triton 部署 DeepSeek-R1-Distill-Llama-8B 模型
 
-In this tutorial we'll use vLLM Backend to deploy
-[`DeepSeek-R1-Distill-Llama-8B`](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B).
-Read more about vLLM [here](https://blog.vllm.ai/2023/06/20/vllm.html) and
-the vLLM Backend [here](https://github.com/triton-inference-server/vllm_backend).
+本教程将使用 vLLM Backend 部署
+[`DeepSeek-R1-Distill-Llama-8B`](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B)。
+关于 vLLM 的更多信息请参阅[这里](https://blog.vllm.ai/2023/06/20/vllm.html)，
+关于 vLLM Backend 请参阅[这里](https://github.com/triton-inference-server/vllm_backend)。
 
-## Model Repository
+> 💡 **AI Infra 视角**：vLLM 的核心创新是持续批处理（continuous batching）与 PagedAttention：传统批处理必须等整批请求都完成才释放资源，而持续批处理允许请求按 token 粒度动态进出批次，GPU 上随时都跑着进度各异的请求，大幅提升吞吐。PagedAttention 则把 KV cache 按页管理，像操作系统管理内存一样按需分配，消除了显存碎片。这也是 vLLM 成为当前 LLM 服务主流引擎的原因。
 
-Let's first set up a model repository. In this tutorial we'll use the sample
-model repository, provided in the [Triton vLLM backend repository.](https://github.com/triton-inference-server/vllm_backend/tree/main/samples/model_repository/vllm_model)
+## 模型仓库
 
-You can clone the full repository with:
+首先搭建一个模型仓库。本教程使用 [Triton vLLM backend 仓库](https://github.com/triton-inference-server/vllm_backend/tree/main/samples/model_repository/vllm_model) 中提供的示例模型仓库。
+
+克隆完整仓库：
 ```bash
 git clone -b r25.01 https://github.com/triton-inference-server/vllm_backend.git
 ```
 
-The sample model repository uses [`facebook/opt-125m` model,](https://github.com/triton-inference-server/vllm_backend/blob/80dd0371e0301fabf79c57536e60700d016fcc76/samples/model_repository/vllm_model/1/model.json#L2)
-let's replace it with `"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"`.
-Additionally, please note, that with the default parameters it's important to adjust `gpu_memory_utilization` appropriately to
-your hardware. Please note, that with all default parameters
-`"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"` needs about 35GB of memory to be
-deployed via Triton + vLLM backend, make sure to adjust "gpu_memory_utilization"
-accordingly. For example, for RTX 5880 the minimum value should be `0.69`, at
-the same time `0.41` is sufficient for A100. For the simplicity of this
-tutorial, we'll set this number to `0.9`. The resulting `model.json` should
-look like:
+示例模型仓库使用的是 [`facebook/opt-125m` 模型](https://github.com/triton-inference-server/vllm_backend/blob/80dd0371e0301fabf79c57536e60700d016fcc76/samples/model_repository/vllm_model/1/model.json#L2)，
+我们把它替换成 `"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"`。另外请注意，使用默认参数时，需要根据你的硬件情况适当调整 `gpu_memory_utilization`。在全部使用默认参数的情况下，
+通过 Triton + vLLM backend 部署 `"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"` 大约需要 35GB 显存，请据此调整 `gpu_memory_utilization`。
+例如，RTX 5880 上最小值应为 `0.69`，而 A100 上 `0.41` 就足够了。为了本教程简单起见，我们把它设为 `0.9`。修改后的 `model.json` 如下：
 ```json
 {
     "model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
@@ -60,16 +55,18 @@ look like:
 }
 ```
 
-## Serving with Triton
+> 💡 **AI Infra 视角**：`gpu_memory_utilization` 决定 vLLM 为模型预留的显存比例。大模型推理的显存占用主要有三块：模型权重（weights）、KV cache（为每个正在处理的请求缓存的注意力键值）和激活值（activations）。前两者是占大头且相对可预算的——权重是固定大小，KV cache 随并发请求数增长。调高该值意味着给 KV cache 留更多空间，能支撑更高并发，但挤占了其他用途的显存，调过头会导致申请显存失败或与别的模型打架。做容量规划时，先用 `nvidia-smi` 观察空闲显存，再按并发需求反推这个值。
 
-Then you can run the tritonserver as usual
+## 用 Triton 提供服务
+
+然后按常规方式启动 tritonserver
 ```bash
 LOCAL_MODEL_REPOSITORY=./vllm_backend/samples/model_repository/
 docker run --rm -it --net host --shm-size=2g  --ulimit memlock=-1 \
 --ulimit stack=67108864 --gpus all -v $LOCAL_MODEL_REPOSITORY:/opt/tritonserver/model_repository  \
 nvcr.io/nvidia/tritonserver:26.07-vllm-python-py3 tritonserver --model-repository=model_repository/
 ```
-The server has launched successfully when you see the following outputs in your console:
+当控制台出现以下输出时，说明服务器启动成功：
 
 ```
 I0922 23:28:40.351809 1 grpc_server.cc:2451] Started GRPCInferenceService at 0.0.0.0:8001
@@ -77,14 +74,14 @@ I0922 23:28:40.352017 1 http_server.cc:3558] Started HTTPService at 0.0.0.0:8000
 I0922 23:28:40.395611 1 http_server.cc:187] Started Metrics Service at 0.0.0.0:8002
 ```
 
-## Sending requests via the `generate` endpoint
+## 通过 `generate` 端点发送请求
 
-As a simple example to make sure the server works, you can use the `generate` endpoint to test. More about the generate endpoint [here](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_generate.md).
+作为一个简单的验证示例，你可以用 `generate` 端点测试服务器是否正常工作。关于 generate 端点的更多信息请参阅[这里](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_generate.md)。
 
 ```bash
 $ curl -X POST localhost:8000/v2/models/vllm_model/generate -d '{"text_input": "What is Triton Inference Server?", "parameters": {"stream": false, "temperature": 0, "exclude_input_in_output": true, "max_tokens": 45}}' | jq
 ```
-The expected output should look like:
+预期输出如下：
 ```json
 {
   "model_name": "vllm_model",
@@ -93,21 +90,23 @@ The expected output should look like:
 }
 ```
 
-## Sending requests via the Triton client
+> 💡 **AI Infra 视角**：`generate` 端点是 Triton 为生成式 AI 模型提供的专用 HTTP 扩展接口，把"拼接提示词、调用模型、解码输出"打包成一个简单调用，免去手工拼装张量（tensor）的麻烦。它支持流式返回（`stream: true`）和各类采样参数，适合快速联调。生产接入则更多走标准的 gRPC/HTTP 推理协议，以获得更强的类型检查和性能控制。
 
-The Triton vLLM Backend repository has a [samples folder](https://github.com/triton-inference-server/vllm_backend/tree/main/samples)
-that has an example client.py to test the model.
+## 通过 Triton client 发送请求
+
+Triton vLLM Backend 仓库有一个 [samples 目录](https://github.com/triton-inference-server/vllm_backend/tree/main/samples)，
+里面提供了用于测试模型的示例 client.py。
 
 ```bash
 LOCAL_WORKSPACE=./vllm_backend/samples
 docker run -ti --gpus all --network=host --pid=host --ipc=host -v $LOCAL_WORKSPACE:/workspace nvcr.io/nvidia/tritonserver:26.07-py3-sdk
 ```
-Then you can use client as follows:
+然后按如下方式使用客户端：
 ```bash
 python client.py -m vllm_model
 ```
 
-The following steps should result in a `results.txt` that has the following content
+执行上述步骤后，会生成一个内容如下的 `results.txt`
 ```
 Hello, my name is
 I need to write a program that can read a text file and find all the names in the text. The names can be in any case (uppercase, lowercase, or mixed). Also, the names can be part of longer words or phrases, so I need to make sure that I'm extracting only the names and not parts of other words. Additionally, the names can be separated by various non-word characters, such as commas, periods, apostrophes, etc. So, I need to extract

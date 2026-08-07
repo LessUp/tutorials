@@ -36,11 +36,13 @@ from tritonclient.utils import *
 warnings.filterwarnings("ignore")
 
 
+# 异步流式推理的辅助类：通过队列收集回调返回的结果或错误
 class UserData:
     def __init__(self):
         self._completed_requests = queue.Queue()
 
 
+# 异步推理回调：把每个完成的结果（或错误）放入 UserData 队列
 def callback(user_data, result, error):
     if error:
         user_data._completed_requests.put(error)
@@ -48,6 +50,7 @@ def callback(user_data, result, error):
         user_data._completed_requests.put(result)
 
 
+# 构造 Triton gRPC 输入张量：指定名称、形状，并把 numpy 数据装载进去
 def prepare_tensor(name, input):
     t = grpcclient.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
     t.set_data_from_numpy(input)
@@ -133,7 +136,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     user_data = UserData()
 
+    # 按 Llava 的对话模板拼接提示词：<image> 占位符表示图片特征将插入的位置
     input_text = "USER: <image>\nQuestion:" + args.prompt + " Answer:"
+    # 图片以 URL 字符串形式传入，由服务端拉取；各参数按类型封装为 numpy 数组
     image_url = np.array([args.image_url.encode("utf-8")], dtype=np.object_)
     prompt_data = np.array([input_text.encode("utf-8")], dtype=np.object_)
     max_tokens = np.array([args.max_tokens], dtype=np.int32)
@@ -141,6 +146,7 @@ if __name__ == "__main__":
     top_k = np.array([args.top_k], dtype=np.int32)
     frequency_penalty = np.array([args.frequency_penalty], dtype=np.float32)
     seed = np.array([args.seed], dtype=np.uint64)
+    # 组装全部输入张量：image、prompt 及各项采样参数
     inputs = [
         prepare_tensor("image", image_url),
         prepare_tensor("prompt", prompt_data),
@@ -150,6 +156,7 @@ if __name__ == "__main__":
         prepare_tensor("frequency_penalty", frequency_penalty),
         prepare_tensor("seed", seed),
     ]
+    # 声明期望的输出：生成文本及 token 统计信息
     outputs = []
     for output_name in [
         "text",
@@ -161,6 +168,8 @@ if __name__ == "__main__":
         outputs.append(grpcclient.InferRequestedOutput(output_name))
     output_text = ""
 
+    # 通过 gRPC（8001 端口）建立流式推理客户端：
+    # 流式模式下结果通过回调异步到达，适合长时间生成或流式输出的场景
     with grpcclient.InferenceServerClient(url="localhost:8001") as client:
         client.start_stream(partial(callback, user_data))
         client.async_stream_infer(
@@ -170,6 +179,7 @@ if __name__ == "__main__":
         )
         expected_responses = 1
         processed_count = 0
+        # 从队列中取出流式响应并处理，直到收到预期数量的响应
         while processed_count < expected_responses:
             try:
                 result = user_data._completed_requests.get()
@@ -177,6 +187,7 @@ if __name__ == "__main__":
             except Exception:
                 break
 
+            # 出错时区分"请求被取消"与其他服务端错误
             if type(result) == InferenceServerException:
                 if result.status() == "StatusCode.CANCELLED":
                     print("Request is cancelled")
@@ -185,6 +196,7 @@ if __name__ == "__main__":
                     print(result)
                     raise result
             else:
+                # 正常响应：读取生成的文本并打印
                 output_text = result.as_numpy("text")
                 print(output_text[0].decode("utf-8"))
 

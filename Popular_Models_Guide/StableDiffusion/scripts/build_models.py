@@ -30,27 +30,36 @@ import time
 
 import tritonserver
 
+# 脚本用途：用 Triton 的 Python 客户端 API 加载模型仓库中的模型，
+# 触发模型的 initialize 流程（对 diffusion 模型而言即构建 TensorRT 引擎），
+# 加载成功后卸载模型，从而实现"构建引擎但不常驻服务"的批量建引擎流程。
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    # 指定要构建的模型名，默认 "all" 表示构建仓库中的全部模型
     parser.add_argument("--model", type=str, default="all")
     parser.add_argument(
         "--model-repository", type=str, default="/workspace/diffusion-models"
     )
+    # 等待模型加载（引擎构建）的超时时间，默认 20 分钟
     parser.add_argument("--timeout", type=int, default=60 * 20)
 
     args = parser.parse_args()
 
+    # 创建 Triton 服务器对象；EXPLICIT 模式下模型需显式调用 load 才会加载
     server = tritonserver.Server(
         model_repository=args.model_repository,
         model_control_mode=tritonserver.ModelControlMode.EXPLICIT,
     )
 
+    # 启动服务器并等待其进入就绪状态
     server.start(wait_until_ready=True)
+    # 查询模型仓库中已注册的模型列表（键为 (模型名, 版本号)）
     models = server.models()
 
     if args.model == "all":
         models = models.keys()
     else:
+        # 指定单个模型时，构造 (模型名, -1) 以匹配仓库中的元数据；-1 代表最新版本
         args.model = (args.model, -1)
         if not args.model in models:
             print(f"Model: {args.model} not known")
@@ -58,11 +67,14 @@ if __name__ == "__main__":
         models = [args.model]
 
     for model in models:
+        # 跳过带具体版本号的条目，只处理最新版本
         if model[1] != -1:
             continue
         print(f"Loading Model: {model}")
+        # 显式加载模型，触发引擎构建（或加载已有引擎）
         model = server.load(model[0])
         start = time.time()
+        # 轮询等待模型就绪，直到超时
         while not model.ready() and ((time.time() - start) <= args.timeout):
             time.sleep(10)
 
@@ -72,6 +84,7 @@ if __name__ == "__main__":
             print(f"Error loading: {model}")
             sys.exit(1)
 
+        # 构建完成后卸载模型，释放显存
         server.unload(model, wait_until_unloaded=True)
 
     server.stop()

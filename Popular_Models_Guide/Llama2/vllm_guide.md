@@ -26,17 +26,20 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Deploying Llama2-7B Model with Triton and vLLM
+# 使用 Triton 与 vLLM 部署 Llama2-7B 模型
 
-The vLLM Backend uses vLLM to do inference. Read more about vLLM [here](https://blog.vllm.ai/2023/06/20/vllm.html) and the vLLM Backend [here](https://github.com/triton-inference-server/vllm_backend).
+vLLM Backend 使用 vLLM 执行推理。关于 vLLM 的更多信息请参阅[这里](https://blog.vllm.ai/2023/06/20/vllm.html)，
+关于 vLLM Backend 请参阅[这里](https://github.com/triton-inference-server/vllm_backend)。
 
-## Pre-build instructions
+> 💡 **AI Infra 视角**：与 TRT-LLM 相比，vLLM 的最大优势是"零编译"：直接从 HuggingFace 权重启动，无需构建引擎，换模型、换版本的成本极低，因此特别适合模型频繁迭代或需要快速上线多个模型的场景。代价是通用实现相比 TRT-LLM 的针对性编译，在极端延迟和峰值吞吐上略逊一筹。选型建议：追求极致性能且模型稳定选 TRT-LLM，追求迭代速度和多模型灵活切换选 vLLM。
 
-For this tutorial, we are using the Llama2-7B HuggingFace model with pre-trained weights. Please follow the [README.md](README.md) for pre-build instructions and links for how to run Llama with other backends.
+## 预构建说明
 
-## Installation
+本教程使用带预训练权重的 Llama2-7B HuggingFace 模型。请遵循 [README.md](README.md) 中的预构建说明，并获取在其他后端上运行 Llama 的链接。
 
-The triton vLLM container can be pulled from [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tritonserver) with
+## 安装
+
+Triton vLLM 容器可以从 [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tritonserver) 拉取：
 
 ```bash
 docker run --rm -it --net host --shm-size=2g \
@@ -44,22 +47,24 @@ docker run --rm -it --net host --shm-size=2g \
     -v $PWD/llama2vllm:/opt/tritonserver/model_repository/llama2vllm \
     nvcr.io/nvidia/tritonserver:26.07-vllm-python-py3
 ```
-This will create a `/opt/tritonserver/model_repository` folder that contains the `llama2vllm` model. The model itself will be pulled from the HuggingFace
+这会创建一个 `/opt/tritonserver/model_repository` 文件夹，内含 `llama2vllm` 模型。模型本身会从 HuggingFace 拉取。
 
-Once in the container, install the `huggingface-cli` and login with your own credentials.
+> 💡 **AI Infra 视角**：这里模型权重是服务启动时从 HuggingFace 在线拉取的，适合演示；生产环境不建议这么做——首次拉取可能耗时数分钟、依赖外网可用性，且模型仓库版本可能悄悄变化。规范做法是把权重预先下载到内部存储（对象存储或共享卷），通过挂载或离线镜像分发到 GPU 节点，让容器启动路径完全离线、版本可锁定、可回滚。
+
+进入容器后，安装 `huggingface-cli` 并用你自己的凭据登录。
 ```bash
 pip install --upgrade huggingface_hub
 huggingface-cli login --token <your huggingface access token>
 ```
 
 
-## Serving with Triton
+## 用 Triton 提供服务
 
-Then you can run the tritonserver as usual
+然后按常规方式运行 tritonserver：
 ```bash
 tritonserver --model-repository model_repository
 ```
-The server has launched successfully when you see the following outputs in your console:
+当控制台出现以下输出时，说明服务器启动成功：
 
 ```
 I0922 23:28:40.351809 1 grpc_server.cc:2451] Started GRPCInferenceService at 0.0.0.0:8001
@@ -67,9 +72,9 @@ I0922 23:28:40.352017 1 http_server.cc:3558] Started HTTPService at 0.0.0.0:8000
 I0922 23:28:40.395611 1 http_server.cc:187] Started Metrics Service at 0.0.0.0:8002
 ```
 
-## Sending requests via the `generate` endpoint
+## 通过 `generate` 端点发送请求
 
-As a simple example to make sure the server works, you can use the `generate` endpoint to test. More about the generate endpoint [here](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_generate.md).
+作为一个简单的验证示例，你可以用 `generate` 端点测试服务器是否正常工作。关于 generate 端点的更多信息请参阅[这里](https://github.com/triton-inference-server/server/blob/main/docs/protocol/extension_generate.md)。
 
 ```bash
 $ curl -X POST localhost:8000/v2/models/llama2vllm/generate -d '{"text_input": "What is Triton Inference Server?", "parameters": {"stream": false, "temperature": 0}}'
@@ -81,9 +86,10 @@ $ curl -X POST localhost:8000/v2/models/llama2vllm/generate -d '{"text_input": "
   }
 ```
 
-## Sending requests via the Triton client
+## 通过 Triton client 发送请求
 
-The Triton vLLM Backend repository has a [samples folder](https://github.com/triton-inference-server/vllm_backend/tree/main/samples) that has an example client.py to test the Llama2 model.
+Triton vLLM Backend 仓库有一个 [samples 目录](https://github.com/triton-inference-server/vllm_backend/tree/main/samples)，
+里面提供了用于测试 Llama2 模型的示例 client.py。
 
 ```bash
 pip3 install tritonclient[all]
@@ -93,7 +99,7 @@ $ cd vllm_backend/samples
 $ python3 client.py -m llama2vllm
 
 ```
-The following steps should result in a `results.txt` that has the following content
+执行上述步骤后，会生成一个内容如下的 `results.txt`
 ```bash
 Hello, my name is
 I am a 20 year old student from the Netherlands. I am currently
