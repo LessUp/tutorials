@@ -1,6 +1,6 @@
-# Client Inference Generators
+# 客户端推理请求生成器
 
-The files in this folder are for the deployment of client pods in the same cluster as a model hosted by Triton + TRT-LLM using
-the provided sample Helm chart.
-Each file creates a single deployment of a client container which can be used to generate inference requests for the deployed
-model.
+本目录下的文件用于在集群中部署客户端 Pod，这些 Pod 与由示例 Helm chart 部署的、托管在 Triton + TRT-LLM 上的模型位于同一集群中。
+每个文件都会创建一个独立的客户端容器 Deployment，用于向已部署的模型持续生成推理请求。
+
+> 💡 **AI Infra 视角**：客户端 Pod 的副本数（replicas）就是你可以"拧"的旋钮——客户端越多，打到 Triton 的 QPS 越高，队列积压越明显，HPA 才会真正触发扩容。这套压测思路也是生产环境验证扩缩容策略的标准做法：先制造负载，观察扩缩容行为是否符合预期，再逐步收窄流量确认缩容逻辑。

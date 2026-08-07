@@ -15,12 +15,14 @@
 --->
 
 
-# Container Generation
+# 容器镜像构建
 
-The files in this folder are intended to be used to create the Triton Server container image.
+本目录下的文件用于构建 Triton Server 容器镜像。
 
-Run the following command to create a Triton Server container image.
+运行以下命令构建 Triton Server 容器镜像：
 
 ```bash
 docker build --file ./triton_trt-llm.containerfile --tag <image_name_here> .
 ```
+
+> 💡 **AI Infra 视角**：镜像里除了 Triton Server 之外还打包了 triton CLI 等模型转换工具链，让"转换模型 + 启动服务"可以在同一个镜像内完成。生产环境中这是很常见的取舍：要么维护一个"转换专用镜像 + 服务镜像"的双镜像体系，要么像这里一样用一个全能镜像降低运维复杂度——代价是镜像体积变大、拉取变慢，需要根据实际发布频率权衡。

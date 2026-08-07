@@ -14,139 +14,127 @@
 # limitations under the License.
 --->
 
-# Multi-Node Generative AI w/ Triton Server and TensorRT-LLM
+# 使用 Triton Server 和 TensorRT-LLM 的多节点生成式 AI
 
-It almost goes without saying that large language models (LLM) are large.
-LLMs often are too large to fit in the memory of a single GPU.
-Therefore we need a solution which enables multiple GPUs to cooperate to enable inference serving for this very large models.
+大语言模型（LLM）很"大"，这几乎是不言自明的。
+LLM 往往大到单块 GPU 的内存装不下。
+因此，我们需要一种方案，让多块 GPU 协同工作，为这些超大型模型提供推理服务。
 
-This guide aims to explain how to perform multi-GPU, multi-node deployment of large language models using Triton Server and
-TRT-LLM in a Kubernetes cluster.
-Setting up multi-node LLM support using Triton Inference Server, TensorRT-LLM, and Kubernetes is not difficult, but it does
-require preparation.
+本指南旨在讲解如何使用 Triton Server 和 TRT-LLM 在 Kubernetes 集群中部署多 GPU、多节点的 LLM。
+使用 Triton Inference Server、TensorRT-LLM 和 Kubernetes 搭建多节点 LLM 支持并不困难，但确实需要事先做好准备。
 
-We'll cover the following topics:
+我们将涵盖以下主题：
 
-* [Cluster Setup](#cluster-setup)
-  * [Persistent Volume Setup](#persistent-volume-setup)
-  * [Core Cluster Services](#core-cluster-services)
-    * [Kubernetes Node Feature Discovery service](#kubernetes-node-feature-discovery-service)
-    * [NVIDIA Device Plugin for Kubernetes](#nvidia-device-plugin-for-kubernetes)
-    * [NVIDIA GPU Feature Discovery service](#nvidia-gpu-feature-discovery-service)
-  * [Hugging Face Authorization](#hugging-face-authorization)
-* [Triton Preparation](#triton-preparation)
-  * [Model Preparation Script](#model-preparation-script)
-  * [Custom Container Image](#custom-container-image)
-  * [Kubernetes Pull Secrets](#kubernetes-pull-secrets)
-* [Triton Deployment](#triton-deployment)
-  * [How It Works](#how-it-works)
-  * [Potential Improvements](#potential-improvements)
-    * [Autoscaling and Gang Scheduling](#autoscaling-and-gang-scheduling)
-    * [Network Topology Aware Scheduling](#network-topology-aware-scheduling)
-* [Developing this Guide](#developing-this-guide)
+* [集群搭建（Cluster Setup）](#cluster-setup)
+  * [持久卷设置（Persistent Volume Setup）](#persistent-volume-setup)
+  * [核心集群服务（Core Cluster Services）](#core-cluster-services)
+    * [Kubernetes Node Feature Discovery 服务](#kubernetes-node-feature-discovery-service)
+    * [Kubernetes 的 NVIDIA Device Plugin](#nvidia-device-plugin-for-kubernetes)
+    * [NVIDIA GPU Feature Discovery 服务](#nvidia-gpu-feature-discovery-service)
+  * [Hugging Face 授权](#hugging-face-authorization)
+* [Triton 准备（Triton Preparation）](#triton-preparation)
+  * [模型准备脚本](#model-preparation-script)
+  * [自定义容器镜像](#custom-container-image)
+  * [Kubernetes 拉取凭据（Pull Secrets）](#kubernetes-pull-secrets)
+* [Triton 部署（Triton Deployment）](#triton-deployment)
+  * [工作原理](#how-it-works)
+  * [潜在的改进方向](#potential-improvements)
+    * [自动扩缩容与组调度（Gang Scheduling）](#autoscaling-and-gang-scheduling)
+    * [网络拓扑感知调度](#network-topology-aware-scheduling)
+* [本指南的开发过程（Developing this Guide）](#developing-this-guide)
 
-Prior to beginning this guide/tutorial you will need a couple of things.
+开始本指南/教程之前，你需要准备以下几样东西。
 
-* Kubernetes Control CLI (`kubectl`)
-  [ [documentation](https://kubernetes.io/docs/reference/kubectl/introduction/)
-  | [download](https://kubernetes.io/releases/download/) ]
-* Helm CLI (`helm`)
-  [ [documentation](https://helm.sh/)
-  | [download](https://helm.sh/docs/intro/install) ]
-* Docker CLI (`docker`)
-  [ [documentation](https://docs.docker.com/)
-  | [download](https://docs.docker.com/get-docker/) ]
-* Decent text editing software for editing YAML files.
-* Kubernetes cluster.
-* Fully configured `kubectl` with administrator permissions to the cluster.
+* Kubernetes 控制 CLI（`kubectl`）
+  [ [文档](https://kubernetes.io/docs/reference/kubectl/introduction/)
+  | [下载](https://kubernetes.io/releases/download/) ]
+* Helm CLI（`helm`）
+  [ [文档](https://helm.sh/)
+  | [下载](https://helm.sh/docs/intro/install) ]
+* Docker CLI（`docker`）
+  [ [文档](https://docs.docker.com/)
+  | [下载](https://docs.docker.com/get-docker/) ]
+* 合适的文本编辑工具，用于编辑 YAML 文件。
+* Kubernetes 集群。
+* 配置完成、且对集群拥有管理员权限的 `kubectl`。
 
+## 集群搭建（Cluster Setup）
 
+以下说明用于配置一个 Kubernetes 集群，使用 Triton Server 和 TRT-LLM 部署 LLM。
 
-## Cluster Setup
+### 前置条件
 
-The following instructions are setting up a Kubernetes cluster for the deployment of LLMs using Triton Server and TRT-LLM.
-
-
-### Prerequisites
-
-This guide assumes that all nodes with NVIDIA GPUs have the following:
-- A node label of `nvidia.com/gpu=present` to more easily identify nodes with NVIDIA GPUs.
-- A node taint of `nvidia.com/gpu=present:NoSchedule` to prevent non-GPU pods from being deployed to GPU nodes.
+本指南假定所有带 NVIDIA GPU 的节点都已具备以下配置：
+- 节点标签 `nvidia.com/gpu=present`，用于更方便地识别带有 NVIDIA GPU 的节点。
+- 节点污点 `nvidia.com/gpu=present:NoSchedule`，用于阻止非 GPU 的 Pod 被调度到 GPU 节点上。
 
 > [!Tip]
-> When using a Kubernetes provider like AKS, EKA, or GKE, it is usually best to use their interface when configuring nodes
-> instead of using `kubectl` to do it directly.
+> 如果使用 AKS、EKS 或 GKE 这类 Kubernetes 托管服务，配置节点时通常最好使用它们各自的控制界面，而不是直接用 `kubectl` 操作。
 
+### 持久卷设置（Persistent Volume Setup）
 
-### Persistent Volume Setup
+为了让部署在不同节点上的多个 Pod 能够加载同一个模型的不同分片（shard），从而协同服务那些单块 GPU 无法承载的超大推理请求，我们需要一个共享存储位置。
+在 Kubernetes 中，这种共享存储位置称为持久卷（persistent volume）。
+持久卷可以同时映射挂载到任意数量的 Pod 中，Pod 内的进程可以像访问自己文件系统的一部分那样访问它。
 
-To enable multiple pods deployed to multiple nodes to load shards of the same model so that they can used in coordination to
-serve inference request too large to loaded by a single GPU, we'll need a common, shared storage location.
-In Kubernetes, these common, shared storage locations are referred to as persistent volumes.
-Persistent volumes can be volume mapped in to any number of pods and then accessed by processes running inside of said pods
-as if they were part of the pod's file system.
+此外，我们还需要创建一个持久卷声明（persistent-volume claim，PVC），用它把持久卷分配给某个 Pod。
 
-Additionally, we will need to create a persistent-volume claim which can use to assign the persistent volume to a pod.
+遗憾的是，持久卷的创建方式取决于集群的搭建方式，这超出了本教程的范围。
+不过，我们会提供一个基本流程概述。
 
-Unfortunately, the creation of a persistent volume will depend on how your cluster is setup, and is outside the scope of this
-tutorial.
-That said, we will provide a basic overview of the process.
+> 💡 **AI Infra 视角**：多节点推理的"共享存储"是刚需：每个 rank 要加载同一份模型权重分片和 tokenizer，如果各节点各自下载或生成，既慢又浪费带宽。把模型仓库放到共享存储上，一份文件多处挂载，模型更新只需替换一份文件，这也是 AI 推理集群的常见做法。注意存储性能（尤其 EFS 的吞吐上限）在模型并发加载时会成为瓶颈，生产环境常改用 FSx for Lustre 这类高性能并行文件系统。
 
-#### Create a Persistent Volume
+#### 创建持久卷
 
-If your cluster is hosted by a cloud service provider, (CSP) like Amazon (EKS), Azure (AKS), or gCloud (GKE)
-step-by-step instructions are available online for how to setup a persistent volume for your cluster.
-Otherwise, you will need to work with your cluster administrator or find a separate guide online on how to setup a
-persistent volume for your cluster.
+如果你的集群由云服务商（CSP）托管，例如 Amazon（EKS）、Azure（AKS）或 gCloud（GKE），网上都有为集群设置持久卷的分步教程。
+否则，你需要与集群管理员合作，或者在网上另找一份为集群设置持久卷的指南。
 
-The following resources can assist with the setting up of persistent volumes for your cluster.
+以下资源可以帮助你为集群设置持久卷。
 
-* [Kubernetes Persistent Volumes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)
-* [AKS Persistent Volumes](https://learn.microsoft.com/en-us/azure/aks/azure-csi-disk-storage-provision)
-* [EKS Persistent Volumes](https://aws.amazon.com/blogs/storage/persistent-storage-for-kubernetes/)
-* [GKE Persistent Volumes](https://cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes)
-* [OKE Persistent Volumes](https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengcreatingpersistentvolumeclaim.htm)
+* [Kubernetes 持久卷](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)
+* [AKS 持久卷](https://learn.microsoft.com/en-us/azure/aks/azure-csi-disk-storage-provision)
+* [EKS 持久卷](https://aws.amazon.com/blogs/storage/persistent-storage-for-kubernetes/)
+* [GKE 持久卷](https://cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes)
+* [OKE 持久卷](https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengcreatingpersistentvolumeclaim.htm)
 
 > [!Important]
-> It is important to consider the storage requirements of the models you expect your cluster to host, and be sure to
-> sufficiently size the persistent volume for the combined storage size of all models.
+> 考虑集群将要承载的模型的存储需求非常重要，请务必让持久卷的容量足以容纳所有模型的总存储大小。
 
-Below are some example values gathered from internal testing of this tutorial.
+下面是一些本教程内部测试时得到的示例值。
 
-| Model           | Parallelism | Raw Size | Converted Size | Total Size |
+| 模型           | 并行度 | 原始大小 | 转换后大小 | 总计大小 |
 | :-------------- | ----------: | -------: | -------------: | ---------: |
 | **Llama-3-8B**  | 2           | 15Gi     | 32Gi           | 47Gi       |
 | **Llama-3-8B**  | 4           | 15Gi     | 36Gi           | 51Gi       |
 | **Llama-3-70B** | 8           | 90Gi     | 300Gi          | 390Gi      |
 
-#### Create a Persistent-Volume Claim
+> [!Important]
+> 注意表中"转换后大小"远大于原始大小——TRT-LLM 引擎文件比原始权重更"重"，其中包含算子融合后的 kernel、内存布局规划等。规划存储时最容易低估的就是这一点：转换后的引擎文件通常接近甚至数倍于原始模型大小，而且每个"并行度配置 × GPU 型号"组合都需要单独一份引擎。这也是生产环境要做存储容量预算和引擎缓存清理策略的原因。
 
-In order to connect the Triton Server pods to the persistent volume created above, we need to create a persistent-volume
-claim (PVC). You can use the [pvc.yaml](./pvc.yaml) file provided as part of this tutorial to create one.
+#### 创建持久卷声明
+
+要把 Triton Server Pod 连接到上面创建的持久卷，我们需要创建一个持久卷声明（PVC）。你可以使用本教程提供的 [pvc.yaml](./pvc.yaml) 文件来创建。
 
 > [!Important]
-> The `volumeName` property must match the `metadata.name` property of the persistent volume created above.
+> `volumeName` 属性必须与上面创建的持久卷的 `metadata.name` 属性一致。
 
+### 核心集群服务（Core Cluster Services）
 
-### Core Cluster Services
+所有节点正确打标签和设置污点后，按照以下步骤准备集群，使用 Triton Server 跨多个节点部署大语言模型。
 
-Once all nodes are correctly labeled and tainted, use the following steps to prepare the cluster deploying large language
-models across multiple nodes with Triton Server.
+下面一系列步骤是为全新集群准备的。
+对于处于各种中间状态的集群，最好先与集群管理员协调，再安装新的服务和能力。
 
-The following series of steps are intended to prepare a fresh cluster.
-For clusters in varying states, it is best to coordinate with your cluster administrator before installing new services and
-capabilities.
+#### Kubernetes Node Feature Discovery 服务
 
-#### Kubernetes Node Feature Discovery service
-
-1.  Add the Kubernetes Node Feature Discovery chart repository to the local cache.
+1.  将 Kubernetes Node Feature Discovery chart 仓库添加到本地缓存。
 
     ```bash
     helm repo add kube-nfd https://kubernetes-sigs.github.io/node-feature-discovery/charts \
       && helm repo update
     ```
 
-2.  Run the command below to install the service.
+2.  运行以下命令安装该服务。
 
     ```bash
     helm install -n kube-system node-feature-discovery kube-nfd/node-feature-discovery \
@@ -157,140 +145,123 @@ capabilities.
     ```
 
     > [!Note]
-    > The above command sets toleration values which allow for the deployment of a pod onto a node with
-    > a matching taint.
-    > See this document's [prerequisites](#prerequisites) for the taints this document expected to have been applied to GPU
-    > nodes in the cluster.
+    > 上面的命令设置了容忍（toleration）值，允许 Pod 被调度到带有匹配污点的节点上。
+    > 参见本文档的[前置条件](#prerequisites)，了解本文档预期已应用到集群 GPU 节点上的污点。
 
-#### NVIDIA Device Plugin for Kubernetes
+#### Kubernetes 的 NVIDIA Device Plugin
 
-1.  This step is unnecessary if the Device Plugin has already been installed in your cluster.
-    Cloud provider turnkey Kubernetes clusters, such as those from AKS, EKS, and GKE, often have the Device Plugin
-    automatically once a GPU node as been added to the cluster.
+1.  如果你的集群已经安装了 Device Plugin，可以跳过这一步。
+    AKS、EKS 和 GKE 这类云厂商的托管 Kubernetes 集群，通常在向集群添加 GPU 节点时就会自动安装 Device Plugin。
 
-    To check if your cluster requires the NVIDIA Device Plugin for Kubernetes, run the following command and inspect
-    the output for `nvidia-device-plugin-daemonset`.
+    要检查你的集群是否需要 Kubernetes 的 NVIDIA Device Plugin，请运行以下命令，并在输出中查找 `nvidia-device-plugin-daemonset`。
 
     ```bash
     kubectl get daemonsets --all-namespaces
     ```
 
-    Example output:
+    示例输出：
     ```text
     NAMESPACE     NAME         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE
     kube-system   kube-proxy   6         6         6       6            6
     ```
 
-2.  If `nvidia-device-plugin-daemonset` is not listed, run the command below to install the plugin.
-    Once installed it will provide containers access to GPUs in your clusters.
+2.  如果列表中没有 `nvidia-device-plugin-daemonset`，请运行下面的命令安装该插件。
+    安装后，它会让容器能够访问集群中的 GPU。
 
-    For additional information, see
-    [Github/NVIDIA/k8s-device-plugin](https://github.com/NVIDIA/k8s-device-plugin/blob/main/README.md).
+    更多信息参见
+    [Github/NVIDIA/k8s-device-plugin](https://github.com/NVIDIA/k8s-device-plugin/blob/main/README.md)。
 
     ```bash
     kubectl create -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.15.0/deployments/static/nvidia-device-plugin.yml
     ```
 
-#### NVIDIA GPU Feature Discovery Service
+#### NVIDIA GPU Feature Discovery 服务
 
-1.  This step is unnecessary if the service has already been installed in your cluster.
+1.  如果你的集群已经安装了该服务，可以跳过这一步。
 
-    To check if your cluster requires the NVIDIA Device Plugin for Kubernetes, run the following command and inspect
-    the output for `nvidia-device-plugin-daemonset`.
+    要检查你的集群是否需要 Kubernetes 的 NVIDIA Device Plugin，请运行以下命令，并在输出中查找 `gpu-feature-discovery`。
 
     ```bash
     kubectl get daemonsets --all-namespaces
     ```
 
-    Example output:
+    示例输出：
     ```text
     NAMESPACE     NAME                             DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE
     kube-system   kube-proxy                       6         6         6       6            6
     kube-system   nvidia-device-plugin-daemonset   6         6         6       6            6
     ```
 
-2.  If `gpu-feature-discovery` is listed, skip this step and the next.
+2.  如果列表中已有 `gpu-feature-discovery`，请跳过这一步和下一步。
 
-    Otherwise, use the YAML file below to install the GPU Feature Discovery service.
+    否则，请使用下面的 YAML 文件安装 GPU Feature Discovery 服务。
 
     > [nvidia_gpu-feature-discovery_daemonset.yaml](nvidia_gpu-feature-discovery_daemonset.yaml)
 
-    The file above was created by downloading its contents from
+    上面的文件是从
     [GitHub/NVIDIA](https://raw.githubusercontent.com/NVIDIA/gpu-feature-discovery/v0.8.2/deployments/static/gpu-feature-discovery-daemonset.yaml)
-    and modified specifically for this tutorial.
+    下载内容，并针对本教程做了修改。
 
     ```bash
     curl https://raw.githubusercontent.com/NVIDIA/gpu-feature-discovery/v0.8.2/deployments/static/gpu-feature-discovery-daemonset.yaml \
       >  nvidia_gpu-feature-discovery_daemonset.yaml
     ```
 
-3.  Then run the command below to install the
+3.  然后运行以下命令进行安装。
 
     ```bash
     kubectl apply -f ./nvidia_gpu-feature-discovery_daemonset.yaml
     ```
 
+> 💡 **AI Infra 视角**：这一组"核心集群服务"（NFD → Device Plugin → GFD）层层递进：NFD 探测节点硬件特性，Device Plugin 把 GPU 变成可调度资源，GFD 再把 GPU 型号等特性打成节点标签。三者配合，K8s 调度器才能做到"按 GPU 数量调度 + 按 GPU 型号选节点"。多节点模型部署时，这些组件更是前提——调度器要精确地把整组 Pod 放到互连最优的节点上。
 
-### Hugging Face Authorization
+### Hugging Face 授权
 
-In order to download models from Hugging Face, your pods will require an access token with the appropriate permission to
-download models from their servers.
+要从 Hugging Face 下载模型，你的 Pod 需要一个具有相应权限的访问令牌（access token）才能从他们的服务器下载模型。
 
-1.  If you do not already have a Hugging Face access token, you will need to created one.
-    To create a Hugging Face access token,
-    [follow their guide](https://huggingface.co/docs/hub/en/security-tokens).
+1.  如果你还没有 Hugging Face 访问令牌，需要创建一个。
+    创建方法参见
+    [他们的指南](https://huggingface.co/docs/hub/en/security-tokens)。
 
-2.  Once you have a token, use the command below to persist the token as a secret named `hf-model-pull` in your cluster.
+2.  拿到令牌后，用下面的命令把它保存为集群中名为 `hf-model-pull` 的 secret。
 
     ```bash
     kubectl create secret generic hf-model-pull '--from-literal=password=<access_token>'
     ```
 
-3.  To verify that your secret has been created, use the following command and inspect the output for your secret.
+3.  要验证 secret 是否创建成功，使用下面的命令并在输出中查找你的 secret。
 
     ```bash
     kubectl get secrets
     ```
 
+## Triton 准备（Triton Preparation）
 
+### 模型准备脚本
 
-## Triton Preparation
+这个脚本的职责是从 Hugging Face 获取模型文件、生成 TensorRT 引擎和 plan 文件，并缓存这些生成的文件。
+脚本依赖这样一个事实：我们要用的 Kubernetes 部署脚本依赖持久卷，而持久卷由 Helm chart 中提供的持久卷声明（PVC）支撑。
 
-
-### Model Preparation Script
-
-The intention of this script to handle the acquisition of the model file from Hugging Face, the generation of the TensorRT
-engine and plan files, and the caching of said generated files.
-The script depends on the fact that the Kubernetes deployment scripts we'll be using rely on the persistent volume backing the
-persistent-volume claim provided as part of the Helm chart.
-
-Specially, the model and engine directories will me mapped to folders in the persistent volume and remapped to all subsequent
-pods deployed as part of the Helm chart.
-This enables the generation script to detect that the plan and engine generation steps have been completed and not repeat work.
+具体来说，模型目录和引擎目录会映射到持久卷上的文件夹，并重新映射到 Helm chart 部署的所有后续 Pod 中。
+这样生成脚本就能检测到 plan 和引擎的生成步骤已完成，从而避免重复劳动。
 
 > [!Tip]
-> This script will executed as a job every time the Helm chart is installed unless the `.model.skipConversion` property is
-> set to `false`.
+> 每次安装 Helm chart 时，这个脚本都会作为一个 Job 执行，除非把 `.model.skipConversion` 属性设为 `true`。
 
-When Triton Server is started, the same persistent volume folders will be mounted to its container and Triton will use the
-pre-generated model plan and engine files.
-Not only does this enable pods on separate nodes to share the same model engine and plan files, it drastically reduces the time
-required for subsequent pod starts on the same node.
+Triton Server 启动时，相同的持久卷文件夹会被挂载到它的容器中，Triton 会直接使用预生成的模型 plan 和引擎文件。
+这不仅让不同节点上的 Pod 可以共享同一份模型引擎和 plan 文件，还大幅缩短了同一节点上后续 Pod 的启动时间。
 
 > [!Note]
-> You can look at the code used to acquire and convert the models in [containers/server.py](containers/server.py).
-> This file is copied into the server container image (see below) during its creation and then executed when the conversion
-> job pod is deployed.
+> 你可以在 [containers/server.py](containers/server.py) 中查看获取和转换模型的代码。
+> 这个文件在构建镜像时被复制进服务器容器镜像（见下文），然后在转换 Job 的 Pod 部署时执行。
 
-#### Custom Container Image
+#### 自定义容器镜像
 
-1.  Using the file below, we'll create a custom container image in the next step.
+1.  使用下面的文件，我们在下一步创建一个自定义容器镜像。
 
     > [triton_trt-llm.containerfile](containers/triton_trt-llm.containerfile)
 
-2.  Run the following command to create a custom Triton Inference Server w/ all necessary tools to generate TensorRT-LLM
-    plan and engine files. In this example we'll use the tag `24.04` to match the date portion of `24.04-trtllm-python-py3`
-    from the base image.
+2.  运行下面的命令创建一个自定义的 Triton Inference Server 镜像，包含生成 TensorRT-LLM plan 和 engine 文件所需的全部工具。本例使用标签 `24.04`，与基础镜像的 `24.04-trtllm-python-py3` 日期部分保持一致。
 
     ```bash
     docker build \
@@ -300,25 +271,20 @@ required for subsequent pod starts on the same node.
       .
     ```
 
-    ##### Custom Version of Triton CLI
+    ##### Triton CLI 的自定义版本
 
-    This custom Triton Server container image makes use of a custom version of the Triton CLI.
-    The relevant changes have been made available as a
-    [topic branch](https://github.com/triton-inference-server/triton_cli/tree/jwyman/aslb-mn) in the Triton CLI repository on
-    GitHub.
-    The changes in the branch can be
-    [inspected](https://github.com/triton-inference-server/triton_cli/compare/main...jwyman/aslb-mn) using the GitHub
-    interface, and primarily contain the addition of the ability to specify tensor parallelism when optimizing models for
-    TensorRT-LLM and enable support for additional models.
+    这个自定义的 Triton Server 容器镜像使用了一个自定义版本的 Triton CLI。
+    相关改动已作为
+    [topic 分支](https://github.com/triton-inference-server/triton_cli/tree/jwyman/aslb-mn) 发布在 GitHub 上的 Triton CLI 仓库中。
+    该分支的改动可以通过 GitHub 界面[查看](https://github.com/triton-inference-server/triton_cli/compare/main...jwyman/aslb-mn)，主要包含：为 TensorRT-LLM 优化模型时支持指定张量并行度，以及支持更多模型。
 
-3.  Upload the Container Image to a Cluster Visible Repository.
+3.  将容器镜像上传到集群可访问的仓库。
 
-    In order for your Kubernetes cluster to be able to download out new container image, it will need to be pushed to a
-    container image repository that nodes in your cluster can reach.
-    In this example, we'll use the fictional `nvcr.io/example` repository for demonstration purposes.
-    You will need to determine which repositories you have write access to that your cluster can also access.
+    要让 Kubernetes 集群能够下载我们的新容器镜像，必须把它推送到集群节点可以访问的容器镜像仓库。
+    本例使用虚构的 `nvcr.io/example` 仓库做演示。
+    你需要确定自己有哪些可写权限的仓库，并且你的集群也能访问这些仓库。
 
-    1. First, re-tag the container image with the repository's name like below.
+    1. 首先，像下面这样用仓库名重新标记容器镜像。
 
         ```bash
         docker tag \
@@ -326,21 +292,19 @@ required for subsequent pod starts on the same node.
           nvcr.io/example/triton_trt-llm:24.04
         ```
 
-    2. Next, upload the container image to your repository.
+    2. 接下来，把容器镜像上传到你的仓库。
 
         ```bash
         docker push nvcr.io/example/triton_trt-llm:24.04
         ```
 
-#### Kubernetes Pull Secrets
+#### Kubernetes 拉取凭据（Pull Secrets）
 
-If your container image repository requires credentials to download images from, then you will need to create a Kubernetes
-docker-registry secret.
-We'll be using the `nvcr.io` container image repository example above for demonstration purposes.
-Be sure to properly escape any special characters such as `$` in the password or username values.
+如果你的容器镜像仓库要求凭据才能拉取镜像，那么你需要创建一个 Kubernetes docker-registry 类型的 secret。
+下面用上面的 `nvcr.io` 容器镜像仓库示例做演示。
+请务必正确转义密码或用户名中的特殊字符，例如 `$`。
 
-1.  Use the command below to create the necessary secret.  Secrets for your repository should be similar, but not be identical
-to the example below.
+1.  使用下面的命令创建所需的 secret。你的仓库对应的 secret 应该与下面的示例类似，但不会完全相同。
 
     ```bash
     kubectl create secret docker-registry ngc-container-pull \
@@ -349,21 +313,20 @@ to the example below.
       --docker-username='\$oauthtoken'
     ```
 
-2.  The above command will create a secret in your cluster named `ngc-container-pull`.
-    You can verify that the secret was created correctly using the following command and inspecting its output for the secret
-    you're looking for.
+2.  上面的命令会在你的集群中创建一个名为 `ngc-container-pull` 的 secret。
+    你可以用下面的命令验证 secret 是否创建正确，并在输出中查找对应的 secret。
 
     ```bash
     kubectl get secrets
     ```
 
-3.  Ensure the contents of the secret are correct, you can run the following command.
+3.  要确认 secret 的内容正确，可以运行下面的命令。
 
     ```bash
     kubectl get secret/ngc-container-pull -o yaml
     ```
 
-    You should see an output similar to the following.
+    你应该会看到类似下面的输出。
 
     ```yaml
     apiVersion: v1
@@ -376,7 +339,7 @@ to the example below.
     type: kubernetes.io/dockerconfigjson
     ```
 
-    The value of `.dockerconfigjson` is a base-64 encoded string which can be decoded into the following.
+    `.dockerconfigjson` 的值是一个 base-64 编码的字符串，可以解码成下面的内容。
 
     ```json
     {
@@ -390,84 +353,75 @@ to the example below.
     }
     ```
 
-    You can use this compact command line to get the above output with a single command.
+    你可以用下面这一行紧凑命令直接得到上面的输出。
 
     ```bash
     kubectl get secret/ngc-container-pull -o json | jq -r '.data[".dockerconfigjson"]' | base64 -d | jq
     ```
 
     > [!Note]
-    > The values of `password` and `auth` are also base-64 encoded string.
-    > We recommend inspecting the values of the following values:
+    > `password` 和 `auth` 的值也是 base-64 编码的字符串。
+    > 我们建议检查以下值：
     >
-    > * Value of `.auths['nvcr.io'].username`.
-    > * Base64 decoded value of `.auths['nvcr.io'].password`.
-    > * Base64 decoded value of `.auths['nvcr.io'].auths`.
+    > * `.auths['nvcr.io'].username` 的值。
+    > * `.auths['nvcr.io'].password` 的 base64 解码值。
+    > * `.auths['nvcr.io'].auth` 的 base64 解码值。
 
-
-
-## Triton Deployment
+## Triton 部署（Triton Deployment）
 
 > [!Note]
-> Deploying Triton Server with a model that fits on a single GPU is straightforward but not explained by this guide.
-> For instructions and examples of deploying a model using a single GPU or multiple GPUs on a single node, use the
-> [Autoscaling and Load Balancing Generative AI w/ Triton Server and TensorRT-LLM Guide](../TensorRT-LLM_Autoscaling_and_Load_Balancing/README.md) instead.
+> 部署一个能装进单块 GPU 的模型到 Triton Server 上很简单，但本指南不讲解这部分。
+> 单 GPU 或单节点多 GPU 的模型部署说明和示例，请改用
+> [使用 Triton Server 和 TensorRT-LLM 对生成式 AI 进行自动扩缩容与负载均衡指南](../TensorRT-LLM_Autoscaling_and_Load_Balancing/README.md)。
 
-Given the memory requirements of some AI models it is not possible to host them using a single device.
-Triton and TensorRT-LLM provide a mechanism to enable a large model to be hosted by multiple GPU devices working in concert.
-The provided sample Helm [chart](./chart/) provides a mechanism for taking advantage of this capability.
+考虑到某些 AI 模型的内存需求，单块设备无法承载它们。
+Triton 和 TensorRT-LLM 提供了一种机制，让多个 GPU 设备协同工作来承载大模型。
+提供的示例 Helm [chart](./chart/) 就提供了利用这一能力的机制。
 
-To enable this feature, adjust the `model.tensorrtLlm.parallelism.tensor` value to an integer greater than 1.
-Configuring a model to use tensor parallelism enables the TensorRT-LLM runtime to effectively combine the memory of multiple
-GPUs to host a model too large to fit on a single GPU.
+要启用该功能，请把 `model.tensorrtLlm.parallelism.tensor` 的值改为大于 1 的整数。
+为模型配置张量并行（tensor parallelism）后，TensorRT-LLM 运行时会高效地合并多块 GPU 的内存，从而承载单块 GPU 装不下的模型。
 
-Similarly, changing the value of `model.tensorrtLlm.parallelism.pipeline` will enable pipeline parallelism.
-Pipeline parallelism is used to combine the compute capacity of multiple GPUs to process inference requests in parallel.
+同样，修改 `model.tensorrtLlm.parallelism.pipeline` 的值可以启用流水线并行（pipeline parallelism）。
+流水线并行用于合并多块 GPU 的计算能力，并行处理推理请求。
 
 > [!Important]
-> The product of the values of `.tensor` and `.pipeline` should be a power of 2 greater than `0` and less than or equal to
-> `32`.
+> `.tensor` 和 `.pipeline` 值的乘积应为大于 `0` 且小于或等于 `32` 的 2 的幂。
 
-The number of GPUs required to host the model is equal to product of the values of `.tensor` and `.pipeline`.
-When the model is deployed, one pod per GPU required will be created.
-The Helm chart will create a leader pod and one or more work pods, depending on the number of additional pods required to
-host the model.
-Additionally, a model conversion job will be created to download the model from Hugging Face and then convert the downloaded
-model into TRT-LLM engin and plan files.
-To disable the creation of a conversion job by the Helm chart, set the values file's `model.skipConversion` property to
-`false`.
+承载模型所需的 GPU 数量等于 `.tensor` 和 `.pipeline` 值的乘积。
+部署模型时，每块所需 GPU 会创建一个 Pod。
+Helm chart 会创建一个 leader Pod，并根据承载模型还需要多少个 Pod，创建一个或多个 worker Pod。
+此外，还会创建一个模型转换 Job，用于从 Hugging Face 下载模型，并把下载的模型转换成 TRT-LLM 引擎和 plan 文件。
+要禁用 Helm chart 创建转换 Job，请把 values 文件中的 `model.skipConversion` 属性设为 `true`。
 
 > [!Warning]
-> If your cluster has insufficient resources to create the conversion job, the leader pod, and the required worker pods,
-> and the job pod is not scheduled to execute first, it is possible for the example Helm chart to become "hung" due to the
-> leader pod waiting on the job pod's completion and there being insufficient resources to schedule the job pod.
+> 如果你的集群资源不足，无法同时创建转换 Job、leader Pod 和所需的 worker Pod，而 Job Pod 又没有被优先调度执行，示例 Helm chart 可能会"卡住"——因为 leader Pod 在等待 Job Pod 完成，而资源不足导致 Job Pod 无法被调度。
 >
-> If this occurs, it is best to delete the Helm installation and retry until the job pod is successfully scheduled.
-> Once the job pod completes, it will release its resources and make them available for the other pods to start.
+> 如果发生这种情况，最好删除 Helm 安装并重试，直到 Job Pod 被成功调度。
+> Job Pod 完成后会释放资源，让其他 Pod 得以启动。
 
-### Deploying Single GPU Models
+> 💡 **AI Infra 视角**：这里埋着一个多节点推理的经典资源调度坑：leader 等待转换 Job 完成，而 Job 又因资源不足排不上队，形成互相等待的死锁。生产上的对策是资源配额预留（给 Job 单独划资源池）、优先级（PriorityClass）让 Job 先跑，或干脆把模型转换放到集群外的 CI/CD 流水线里完成，集群里只做推理。
 
-Deploying Triton Server with a model that fits on a single GPU is straightforward using the steps below.
+### 部署单 GPU 模型
 
-1.  Create a custom values file with required values:
+按照下面的步骤，部署一个能装进单块 GPU 的模型到 Triton Server 上，非常简单直接。
 
-    * Container image name.
-    * Model name.
-    * Supported / available GPU.
-    * Image pull secrets (if necessary).
-    * Hugging Face secret name.
+1.  创建一个包含必需值的自定义 values 文件：
 
-    The provided sample Helm [chart](./chart/) include several example values files such as
-    [llama-3-8b_values.yaml](chart/llama-3-8b-instruct_values.yaml).
+    * 容器镜像名称。
+    * 模型名称。
+    * 支持/可用的 GPU。
+    * 镜像拉取凭据（如有必要）。
+    * Hugging Face secret 名称。
 
-2.  Deploy LLM on Triton + TRT-LLM.
+    提供的示例 Helm [chart](./chart/) 中包含几个示例 values 文件，例如
+    [llama-3-8b_values.yaml](chart/llama-3-8b-instruct_values.yaml)。
 
-    Apply the custom values file to override the exported base values file using the command below, and create the Triton
-    Server Kubernetes deployment.
+2.  在 Triton + TRT-LLM 上部署 LLM。
+
+    用下面的命令应用自定义 values 文件来覆盖导出的基础 values 文件，并创建 Triton Server Kubernetes deployment。
 
     > [!Tip]
-    > The order that the values files are specified on the command line is important with values are applied and
-    > override existing values in the order they are specified.
+    > 命令行上指定 values 文件的顺序很重要，values 会按指定的顺序依次应用并覆盖已有值。
 
     ```bash
     helm install <installation_name> \
@@ -478,20 +432,20 @@ Deploying Triton Server with a model that fits on a single GPU is straightforwar
     ```
 
     > [!Important]
-    > Be sure to substitute the correct values for `<installation_name>` and `<custom_values>` in the example above.
+    > 请务必把上面示例中的 `<installation_name>` 和 `<custom_values>` 替换成正确的值。
 
-3.  Verify the Chart Installation.
+3.  验证 Chart 安装。
 
-    Use the following commands to inspect the installed chart and to determine if everything is working as intended.
+    使用下面的命令检查已安装的 chart，确认一切是否按预期工作。
 
     ```bash
     kubectl get deployments,pods,services,jobs --selector='app=<installation_name>'
     ```
 
     > [!Important]
-    > Be sure to substitute the correct value for `<installation_name>` in the example above.
+    > 请务必把上面示例中的 `<installation_name>` 替换成正确的值。
 
-    You should output similar to below (assuming the installation name of "llama-3"):
+    输出应该类似下面这样（假设安装名称为 "llama-3"）：
 
     ```text
     NAME                      READY   UP-TO-DATE   AVAILABLE
@@ -504,243 +458,204 @@ Deploying Triton Server with a model that fits on a single GPU is straightforwar
     service/llama-3   ClusterIP   10.100.23.237   <none>        8000/TCP,8001/TCP,8002/TCP
     ```
 
-4.  Uninstalling the Chart
+4.  卸载 Chart
 
-    Uninstalling a Helm chart is as straightforward as running the command below.
-    This is useful when experimenting with various options and configurations.
+    卸载 Helm chart 很简单，运行下面的命令即可。
+    这在尝试各种选项和配置时非常有用。
 
     ```bash
     helm uninstall <installation_name>
     ```
 
-### How It Works
+### 工作原理
 
-The Helm chart creates a model-conversion job and multiple Kubernetes deployments to support the distributed model's tensor parallelism needs.
-When a distributed model is deployed, a "leader" pod along with a number of "workers" to meet the model's tensor parallelism requirements are
-created.
-The leader pod then awaits for the conversion job to complete and for all worker pods to be successfully deployed.
+Helm chart 会创建一个模型转换 Job 和多个 Kubernetes deployment，以支撑分布式模型的张量并行需求。
+部署分布式模型时，会创建一个 "leader" Pod，以及满足模型张量并行需求所需的一定数量 "worker" Pod。
+leader Pod 随后等待转换 Job 完成，并等待所有 worker Pod 成功部署。
 
-The model-conversion job is responsible for downloading the configured model from Hugging Face and converting that model into a TensorRT-LLM
-ready set of engine and plan files.
-The model-conversion job will place all downloaded and converted files on the provided persistent volume.
+模型转换 Job 负责从 Hugging Face 下载配置好的模型，并把模型转换成一套 TensorRT-LLM 可用的引擎和 plan 文件。
+模型转换 Job 会把所有下载和转换的文件放到提供的持久卷上。
 
 > [!Note]
-> Model downloads from Hugging Face are reused when possible.
-> Converted TRT-LLM models are GPU and tensor-parallelism specific.
-> Therefore a converted model will exist for every GPU the model is deployed on to as well as for every configuration of tensor parallelism.
+> 从 Hugging Face 下载的模型在可能的情况下会被复用。
+> 转换后的 TRT-LLM 模型与 GPU 型号和张量并行配置强相关。
+> 因此，模型部署到每一种 GPU 以及每一种张量并行配置，都会各存在一份转换后的模型。
 
-Once these conditions are met, the leader pod creates an [`mpirun`](https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man1/mpirun.1.html) process which creates a Triton Server process in each pod of the distributed model.
+上述条件满足后，leader Pod 会启动一个 [`mpirun`](https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man1/mpirun.1.html) 进程，为分布式模型的每个 Pod 各创建一个 Triton Server 进程。
 
-The leader pod's process is responsible for handling inference request and response functionality, as well as inference request tokenization and
-result de-tokenization.
-Worker pods' processes provide expanded GPU compute and memory capacity.
-All of the processes are coordinated by the original `mpirun` process.
-Communications between the processes is accelerated by [NVIDIA Collective Communications Library](https://developer.nvidia.com/nccl) (NCCL).
-NCCL enables GPU-to-GPU direct communication and avoids the wasteful data copying from GPU-to-CPU-to-GPU that occur otherwise.
+leader Pod 的进程负责推理请求与响应的收发功能，以及推理请求的 token 化和结果的去 token 化。
+worker Pod 的进程提供扩展的 GPU 计算和内存能力。
+所有进程由最初的 `mpirun` 进程统一协调。
+进程之间的通信由 [NVIDIA Collective Communications Library](https://developer.nvidia.com/nccl)（NCCL）加速。
+NCCL 支持 GPU 到 GPU 的直接通信，避免了原本 GPU→CPU→GPU 的数据拷贝浪费。
 
+> 💡 **AI Infra 视角**：这是多节点推理的标准架构：一个 leader 对外提供 HTTP/gRPC 入口（含 tokenizer 前后处理），多个 rank 通过 MPI 拉起、通过 NCCL 做集合通信，对外表现为"一个逻辑模型"。NCCL 的 AllReduce 是张量并行每层都要做的通信，跨节点时走 RDMA（EFA/IB）才能把延迟压住；如果误走了 TCP，吞吐会断崖式下跌。上线前用 NCCL Test 验证跨节点带宽，是这套架构的必修课。
 
-### Potential Improvements
+### 潜在的改进方向
 
-#### Autoscaling and Gang Scheduling
+#### 自动扩缩容与组调度（Gang Scheduling）
 
-This guide does not provide any solution for autoscaling or load balancing Triton deployments because Kubernetes horizontal pod
-autoscaling (HPA) is not capable of managing deployments composed of multiple pods.
-Additionally, because the solution provided in this tutorial makes use of multiple deployments, any automation has a high risk of concurrent,
-partial deployments exhausting available resources preventing any of the deployments from succeeding.
+本指南没有提供 Triton 部署的自动扩缩容或负载均衡方案，因为 Kubernetes 的水平 Pod 自动扩缩（HPA）无法管理由多个 Pod 组成的部署。
+此外，由于本教程的方案使用了多个 deployment，任何自动化都有很高的风险出现并发、部分部署的情况，耗尽可用资源，导致所有 deployment 都无法成功。
 
-For an example of concurrent, partial deployments preventing each other from successfully deploying, imagine a cluster with 4 nodes, each with 8 GPUs for a total of 32 available GPUs.
-Now consider a model which requires 8 GPUs to be deployed and we attempt to deploy 5 copies of it.
-When individually deploying the models, each deployment is assigned 8 GPUs until there are zero available GPUs remaining resulting in the model
-being successfully deployed 4 times.
-At this point, the system understands that there are no more available resources and the 5 model copy fails to deploy.
+举一个并发部分部署互相阻塞的例子：假设一个集群有 4 个节点，每个节点 8 块 GPU，总共 32 块可用 GPU。
+现在考虑一个需要 8 块 GPU 的模型，我们尝试部署它的 5 个副本。
+逐个部署时，每个 deployment 都会分到 8 块 GPU，直到可用 GPU 变为 0，最终模型成功部署了 4 次。
+此时系统知道没有更多可用资源，第 5 个副本部署失败。
 
-However, when attempting to deploy all 5 copies of the model simultaneously, it is highly likely that each copy will get at least 1 GPU resource
-assigned to it.
-This results in their insufficient resources for at least two of the copies; leaving both deployments stuck in a non-functional, partially
-deployed state.
+然而，如果同时尝试部署全部 5 个副本，很可能每个副本都会至少分到 1 块 GPU。
+结果至少有 2 个副本资源不足，导致这两个 deployment 都停留在不可用的部分部署状态。
 
-One solution to this problem would be to leverage a gang scheduler for Kubernetes.
-Gang scheduling would enable the Kubernetes scheduler to only create a pod if its entire cohort of pods can be created.
-This provides a solution to the partial deployment of model pods blocking each other from being fully deployed.
+解决这个问题的一个方案是利用 Kubernetes 的组调度器（gang scheduler）。
+组调度让 Kubernetes 调度器只有在某个 Pod 的整个"同组"（cohort）Pod 都能被创建时，才创建这个 Pod。
+这样就解决了模型 Pod 部分部署互相阻塞、无法完整部署的问题。
 
 > [!Note]
-> Read about [gang scheduling on Wikipedia](https://en.wikipedia.org/wiki/Gang_scheduling) for additional information.
+> 更多组调度的信息，参见 [维基百科上的 gang scheduling](https://en.wikipedia.org/wiki/Gang_scheduling)。
 
-The above solutions, however, does not provide any kind of autoscaling solution.
-To achieve this, a custom, gang-schedular-aware autoscaler would be required.
+不过，上述方案并没有提供任何自动扩缩容方案。
+要实现自动扩缩容，需要一个支持组调度的自定义自动扩缩器。
 
-#### Network Topology Aware Scheduling
+> 💡 **AI Infra 视角**：组调度的本质是"全有或全无"——要么一整组 Pod 全部获得资源，要么一个都别调度。对多节点推理来说，部分调度的后果是 NCCL 初始化卡死、资源白白占用。文中 5 副本的例子正是经典的资源碎片死锁：每个副本分到一点 GPU，谁都不够跑，互相锁死。生产上要么用 gang scheduler（如 Volcano、Kueue 的 cohort 语义），要么用配额准入控制。
 
-Triton Server w/ TensorRT-LLM leverage a highly-optimized networking stacked known as the
-[NVIDIA Collective Communications Library](https://developer.nvidia.com/nccl) (NCCL) to enable tensor parallelization.
-NCCL takes advantage of he ability for modern GPUs to leverage
-[remote direct memory access](https://en.wikipedia.org/wiki/Remote_direct_memory_access) (RDMA) based network acceleration to optimize operations
-between GPUs regardless if they're on the same or nearby machines.
-This means that quality of the network between GPUs on separate machines directly affects the performance of distributed models.
+#### 网络拓扑感知调度
 
-Providing a network topology aware scheduler for Kubernetes, could help ensure that the GPUs assigned to the pods of a model deployment are
-relatively local to each other.
-Ideally, on the same machine or at least the same networking switch to minimize network latency and the impact of bandwidth limitations.
+Triton Server + TensorRT-LLM 利用高度优化的网络栈
+[NVIDIA Collective Communications Library](https://developer.nvidia.com/nccl)（NCCL）来实现张量并行。
+NCCL 利用现代 GPU 支持
+[远程直接内存访问](https://en.wikipedia.org/wiki/Remote_direct_memory_access)（RDMA）网络加速的能力，优化 GPU 之间的操作，无论它们在同一台机器上还是在相邻的机器上。
+这意味着，不同机器上的 GPU 之间的网络质量直接决定分布式模型的性能。
 
+为 Kubernetes 提供网络拓扑感知的调度器，有助于确保分配给某个模型部署各 Pod 的 GPU 相对彼此在拓扑上比较"近"。
+理想情况下，位于同一台机器上，或者至少位于同一个网络交换机下，以尽量降低网络延迟和带宽限制的影响。
 
-## Developing this Guide
+> 💡 **AI Infra 视角**：张量并行的通信量随 GPU 数量平方级增长，节点间网络质量直接决定模型能跑多快。拓扑感知调度（topology-aware scheduling）把"GPU 在拓扑上够不够近"（同一节点 > 同一机架 > 同一交换机）纳入调度决策，避免把跨节点 TP 的 Pod 拆到网络遥远的位置。云上对应物是 EFA 的 placement group，物理上把实例放到同一骨架交换机下，这是多节点推理性能优化的关键一环。
 
-During the development of this guide, I ran into several problems that needed to be solved before we could provide a useful
-guide.
-This section will outline and describe the issues I ran into and how we resolved them.
+## 本指南的开发过程（Developing this Guide）
 
-> _This document was developed using a Kubernetes cluster provided by Amazon EKS._
-> _Clusters provisioned on-premises or provided by other cloud service providers such as Azure AKS or GCloud GKE might require_
-> _modifications to this guide._
+在编写本指南的过程中，我遇到了几个必须先解决的问题，然后才能写出一份有用的指南。
+本节将概述我在开发过程中遇到的问题以及解决方法。
 
+> _本文档是使用 Amazon EKS 提供的 Kubernetes 集群开发的。_
+> _本地机房或 Azure AKS、GCloud GKE 等其他云厂商提供的集群可能需要对本文档做相应修改。_
 
-### Why This Set of Software Components?
+### 为什么是这套软件组件？
 
-The set of software packages described in this document is close the minimum viable set of packages without handcrafting
-custom Helm charts and YAML files for every package and dependency.
-Is this the only set of packages and components that can be used to make this solution work?
-Definitely not, there are several alternatives which could meet our requirements.
-This set of packages and components is just the set I happen to choose for this guide.
+本文档描述的一组软件包，几乎是"最小可用"的组合，不需要为每个包和依赖手写自定义 Helm chart 和 YAML 文件。
+这是唯一能让这套方案工作的组件组合吗？
+绝对不是，有很多替代方案也能满足需求。
+这套组合只是我在本指南中碰巧选择的方案。
 
-Below is a high-level description of why each package is listed in this guide.
+下面是本指南中每个软件包的用途概述。
 
-#### NVIDIA Device Plugin for Kubernetes
+#### Kubernetes 的 NVIDIA Device Plugin
 
-Required to enable GPUs to be treated as resources by the Kubernetes scheduler.
-Without this component, GPUs would not be assigned to containers correctly.
+让 GPU 能够被 Kubernetes 调度器当作资源处理是必需的。
+没有这个组件，GPU 就无法被正确分配给容器。
 
-#### NVIDIA GPU Discovery Service for Kubernetes
+#### Kubernetes 的 NVIDIA GPU Discovery 服务
 
-Provides automatic labelling of Kubernetes nodes based on the NVIDIA devices and software available on the node.
-Without the provided labels, it would not be possible to specify specific GPU SKUs when deploying models because the
-Kubernetes scheduler treats all GPUs as identical (referring to them all with the generic resources name `nvidia.com/gpu`).
+根据节点上可用的 NVIDIA 设备和软件，自动为 Kubernetes 节点打标签。
+没有这些标签，部署模型时就不可能指定具体的 GPU SKU，因为 Kubernetes 调度器把所有 GPU 都当作相同的（都用通用资源名 `nvidia.com/gpu` 引用）。
 
-#### Kubernetes Node Discovery Service
+#### Kubernetes Node Discovery 服务
 
-This is a requirement for the [NVIDIA GPU Discovery Service for Kubernetes](#nvidia-gpu-discovery-service-for-kubernetes).
+这是 [Kubernetes 的 NVIDIA GPU Discovery 服务](#nvidia-gpu-discovery-service-for-kubernetes) 的前提条件。
 
 #### NVIDIA DCGM Exporter
 
-Provides hardware monitoring and metrics for NVIDIA GPUs and other devices present in the cluster.
-Without the metrics this provides, monitoring GPU utilization, temperature and other metrics would not be possible.
+为集群中 NVIDIA GPU 和其他设备提供硬件监控和指标。
+没有它提供的指标，就无法监控 GPU 利用率、温度和其他指标。
 
-While Triton Server has the capability to collect and serve NVIDIA hardware metrics, relying on Triton Server to provide this
-service is non-optimal for several reasons.
+虽然 Triton Server 本身也能采集和提供 NVIDIA 硬件指标，但依赖 Triton Server 提供这项服务有几个原因说明它并不理想。
 
-Firstly, many processes on the same machine querying the NVIDIA device driver for current state, filtering the results for
-only values that pertain to the individual process, and serving them via Triton's open-metrics server is as wasteful as the
-the number of Triton Server process beyond the first on the node.
+首先，同一台机器上多个进程各自查询 NVIDIA 设备驱动获取当前状态、过滤出只与自己进程相关的值、再通过 Triton 的 open-metrics 服务器对外提供，其浪费程度与节点上超过第一个的 Triton Server 进程数量成正比。
 
-Secondly, due to the need to interface with the kernel-mode driver to retrieve hardware metrics, queries get serialized adding
-additional overhead and latency to the system.
+其次，由于获取硬件指标需要与内核态驱动交互，查询会被串行化，给系统带来额外开销和延迟。
 
-Finally, the rate at which metrics are collected from Triton Server is not the same as the rate at which metrics are collected
-from the DCGM Exporter.
-Separating the metrics collection from Triton Server allows for customized metric collection rates, which enables us to
-further minimize the process overhead placed on the node.
+最后，从 Triton Server 采集指标的频率与从 DCGM Exporter 采集指标的频率是不同的。
+把指标采集从 Triton Server 中分离出来，可以自定义采集频率，从而进一步降低节点上的进程开销。
 
-##### Why is the DCGM Exporter Values File Custom?
+##### 为什么 DCGM Exporter 的 values 文件是自定义的？
 
-I decided to use a custom values file when installing the DCGM Exporter Helm chart for several reasons.
+安装 DCGM Exporter Helm chart 时，我决定使用自定义 values 文件，有几个原因。
 
-Firstly, it is my professional opinion that every container in a cluster should specify resource limits and requests.
-Not doing so opens the node up to a number of difficult to diagnose failure conditions related to resource exhaustion.
-Out of memory errors are the most obvious and easiest to root cause.
-Additionally, difficult to reproduce, transient timeout and timing errors caused CPU over-subscription can easily happen when
-any container is unconstrained and quickly waste an entire engineering team's time as they attempt to triage, debug, and
-resolve them.
+首先，我的专业观点是，集群中的每个容器都应该指定资源 limits 和 requests。
+不这样做，会让节点暴露在多种与资源耗尽相关、且难以诊断的故障条件下。
+内存不足错误是最明显也最容易定位的。
+此外，当某个容器不受资源约束时，很容易发生难以复现的瞬时超时和时序错误（由 CPU 超卖引起），这会快速浪费整个工程团队的时间去分类、调试和解决。
 
-Secondly, the DCGM Exporter process itself spams error logs when it cannot find NVIDIA devices in the system.
-This is primarily because the service was originally created for non-Kubernetes environments.
-Therefore I wanted to restrict which node the exporter would get deployed to.
-Fortunately, the DCGM Helm chart makes this easy by support node selector options.
+其次，DCGM Exporter 进程在系统中找不到 NVIDIA 设备时会刷屏式地打印错误日志。
+这主要是因为该服务最初是为非 Kubernetes 环境创建的。
+因此我想限制 exporter 部署到哪些节点。
+幸运的是，DCGM Helm chart 通过支持 node selector 选项让这件事变得很容易。
 
-Thirdly, because nodes with NVIDIA GPUs have been tainted with the `nvidia.com/gpu=present:NoSchedule` that prevents any
-pod which does not explicitly tolerate the taint from be assigned to the node, I need to add the tolerations to the DCGM
-Exporter pod.
+第三，由于带 NVIDIA GPU 的节点被打上了 `nvidia.com/gpu=present:NoSchedule` 污点，任何没有显式容忍该污点的 Pod 都无法被分配到这些节点，所以我需要给 DCGM Exporter Pod 添加对应的容忍（tolerations）。
 
-Finally, the default Helm chart for DCGM Exporter is missing the required `--kubernetes=true` option being passed in via
-command line options when the process is started.
-Without this option, DCGM Exporter does not correctly associate hardware metrics with the pods actually using it, and
-there would be mechanism for understand how each pod uses the GPU resources assigned to it.
+最后，DCGM Exporter 的默认 Helm chart 缺少启动进程时通过命令行传入的 `--kubernetes=true` 选项。
+没有这个选项，DCGM Exporter 就无法正确地把硬件指标与真正使用它的 Pod 关联起来，也就无法了解每个 Pod 如何使用分配给它的 GPU 资源。
 
+### 为什么使用 Triton CLI 而不是 NVIDIA 提供的其他工具？
 
-### Why Use the Triton CLI and Not Other Tools Provided by NVIDIA?
+我选择使用新的 [Triton CLI](https://github.com/triton-inference-server/triton_cli) 工具来为 TensorRT-LLM 优化模型，而不是其他可用工具，原因有几个。
 
-I chose to use the new [Triton CLI](https://github.com/triton-inference-server/triton_cli) tool to optimize models for
-TensorRT-LLM instead of other available tools for a couple of reasons.
+首先，使用 Triton CLI 把模型的转换和优化简化成了单条命令。
 
-Firstly, using the Triton CLI simplifies the conversion and optimization of models into a single command.
+其次，依赖 Triton CLI 简化了容器的构建，因为所有依赖通过一条 `pip install` 命令就都满足了。
 
-Secondly, relying on the Triton CLI simplifies the creation of the container because all requirements were met with a single
-`pip install` command.
+#### 为什么使用 Triton CLI 的自定义分支而不是官方发布版？
 
-#### Why Use a Custom Branch of Triton CLI Instead of an Official Release?
+我决定使用 [Triton CLI 的自定义分支](https://github.com/triton-inference-server/triton_cli/tree/jwyman/aslb-mn)，因为本指南需要的一些功能在当时的任何官方发布版中都不存在。
+该分支没有提 Merge Request，是因为添加所需功能的方式与维护者计划的改动方向不一致。
+一旦我们达成一致，本指南将更新为使用官方发布版。
 
-I decided to use a custom [branch of Triton CLI](https://github.com/triton-inference-server/triton_cli/tree/jwyman/aslb-mn)
-because there are features this guide needed that were not present in any of the official releases available.
-The branch is not a Merge Request because the method used to add the needed features does not aligned with changes the
-maintainers have planned.
-Once we can achieve alignment, this guide will be updated to use an official release.
+### 为什么 Chart 运行 Python 脚本而不是直接运行 Triton Server？
 
+有两个原因：
 
-### Why Does the Chart Run a Python Script Instead of Triton Server Directly?
+1.  为了从 Hugging Face 获取模型、转换并优化成 TensorRT-LLM 格式、再在宿主机上缓存，我认为使用 [Pod 初始化容器](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/) 是最直接了当的方案。
 
-There are two reasons:
+    为了充分利用初始化容器，我选择了使用新的 [Triton CLI](https://github.com/triton-inference-server/triton_cli) 工具的自定义 [server.py](./containers/server.py) 脚本。
 
-1.  In order to retrieve a model from Hugging Face, convert and optimize it for TensorRT-LLM, and cache it on the host, I
-    decided that [pod initialization container](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/) was the
-    most straightforward solution.
+2.  多 GPU 部署需要相当专用的命令行才能运行，而我不想用 Helm chart 脚本去生成它。
+    利用自定义 Python 脚本是合理且最简单的方案。
 
-    In order to make the best use of the initialization container I chose to use a custom [server.py](./containers/server.py)
-    script that made of the new [Triton CLI](https://github.com/triton-inference-server/triton_cli) tool.
+#### 为什么 Python 代码写成那样？
 
-2.  Multi-GPU deployments require a rather specialized command line to run, and generating it using Helm chart scripting was
-    not something I wanted to deal with.
-    Leveraging the custom Python script was the logical, and easiest, solution.
+因为我不是 Python 开发者，但我正在学！
+我的背景是 C/C++，有大量 shell 脚本经验。
 
-#### Why is the Python Written Like That?
+### 为什么使用自定义 Triton 镜像？
 
-Because I'm not a Python developer, but I am learning!
-My background is in C/C++ with plenty of experience with shell scripting languages.
+我决定使用自定义镜像，有几个原因。
 
-
-### Why Use a Custom Triton Image?
-
-I decided to use a custom image for a few reasons.
-
-1.  Given the answer above and the use of Triton CLI and a custom Python script, the initialization container needed both
-    components pre-installed in it to avoid unnecessary use of ephemeral storage.
+1.  考虑到上面的答案以及 Triton CLI 和自定义 Python 脚本的使用，初始化容器需要预先装好这两个组件，以避免不必要的临时存储（ephemeral storage）使用。
 
     > [!Warning]
-    > Use of ephemeral storage can lead to pod eviction, and therefore should be avoided whenever possible.
+    > 使用临时存储可能导致 Pod 被驱逐（eviction），因此应尽可能避免。
 
-2.  Since the Triton + TRT-LLM image is already incredibly large, I wanted to avoid consuming additional host storage space
-    with yet another container image.
+2.  由于 Triton + TRT-LLM 镜像本身已经非常大，我不想再用另一个容器镜像占用额外的宿主机存储空间。
 
-    Additionally, the experience of a pod appearing to be stuck in the `Pending` state while it download a container prior to
-    the initialization container is easier to understand compared to a short `Pending` state before the initialization
-    container, followed by a much longer `Pending` state before the Triton Server can start.
+    此外，一个 Pod 在下载容器时看起来"卡在" `Pending` 状态，比"初始化容器前短暂 Pending、随后在 Triton Server 启动前长时间 Pending"更容易理解。
 
-3.  I wanted a custom, constant environment variable set for `ENGINE_DEST_PATH` that could be used by both the initialization
-    and Triton Server containers.
+3.  我想要一个自定义的、固定的 `ENGINE_DEST_PATH` 环境变量，让初始化容器和 Triton Server 容器都能使用。
 
 ---
 
-Software versions featured in this document:
+本文档涉及的软件版本：
 
 * Triton Inference Server v2.45.0 (24.04-trtllm-python-py3)
 * TensorRT-LLM v0.9.0
 * Triton CLI v0.0.7
-* NVIDIA Device Plugin for Kubernetes v0.15.0
-* NVIDIA GPU Discovery Service for Kubernetes v0.8.2
+* Kubernetes 的 NVIDIA Device Plugin v0.15.0
+* Kubernetes 的 NVIDIA GPU Discovery 服务 v0.8.2
 * NVIDIA DCGM Exporter v3.3.5
-* Kubernetes Node Discovery Service v0.15.4
-* Prometheus Stack for Kubernetes v58.7.2
-* Prometheus Adapter for Kubernetes v4.10.0
+* Kubernetes Node Discovery 服务 v0.15.4
+* Kubernetes 的 Prometheus Stack v58.7.2
+* Kubernetes 的 Prometheus Adapter v4.10.0
 
 ---
 
-Author: J Wyman, System Software Architect, AI &amp; Distributed Systems
+作者：J Wyman，系统软件架构师，AI 与分布式系统
 
 Copyright &copy; 2024, NVIDIA CORPORATION. All rights reserved.

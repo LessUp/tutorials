@@ -28,10 +28,12 @@ DELAY_BETWEEN_QUERIES = 2
 
 
 def die(exit_code: int):
+    # 打印提示后延迟退出，给管理员留出抓取日志的时间窗口。
     if exit_code is None:
         exit_code = ERROR_CODE_FATAL
 
     write_error(f"       Waiting {ERROR_EXIT_DELAY} second before exiting.")
+    # 延迟进程终止，让管理员在进程退出并重启前有时间抓取日志。
     # Delay the process' termination to provide a small window for administrators to capture the logs before it exits and restarts.
     time.sleep(ERROR_EXIT_DELAY)
 
@@ -39,6 +41,7 @@ def die(exit_code: int):
 
 
 def parse_arguments():
+    # 解析命令行参数：模式（leader/worker）以及 TP/PP、模型仓库目录、GPU 数等选项。
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", type=str, choices=["leader", "worker"])
     parser.add_argument(
@@ -77,6 +80,7 @@ def parse_arguments():
 
 
 def run_command(cmd_args: [str], omit_args: [int] = None):
+    # 执行子进程命令并打印命令行，omit_args 指定的参数用 ***** 打码。
     command = ""
 
     for i, arg in enumerate(cmd_args):
@@ -93,16 +97,19 @@ def run_command(cmd_args: [str], omit_args: [int] = None):
 
 
 def signal_handler(sig, frame):
+    # 收到 SIGINT/SIGTERM 时打印信号并正常退出。
     write_output(f"Signal {sig} detected, quitting.")
     exit(EXIT_SUCCESS)
 
 
 def wait_for_workers(num_total_pod: int, args):
+    # 组调度核心：按 LeaderWorkerSet 的 group-key 标签轮询，等待全部 Pod 进入 Running 状态。
     if num_total_pod is None or num_total_pod <= 0:
         raise RuntimeError("Argument `world_size` must be greater than zero.")
 
     write_output("Begin waiting for worker pods.")
 
+    # 用 kubectl 按 group-key 标签筛选 Running 状态的 Pod。
     cmd_args = [
         "kubectl",
         "get",
@@ -120,6 +127,7 @@ def wait_for_workers(num_total_pod: int, args):
 
     workers = []
 
+    # 循环查询，直到 Running 的 Pod 数量达到期望总数。
     while len(workers) < num_total_pod:
         time.sleep(DELAY_BETWEEN_QUERIES)
 
@@ -144,6 +152,7 @@ def wait_for_workers(num_total_pod: int, args):
 
     write_output(" ")
 
+    # 对 Pod 名排序，保证各节点上 mpirun 的 host 顺序一致。
     if workers is not None and len(workers) > 1:
         workers.sort()
 
@@ -151,14 +160,17 @@ def wait_for_workers(num_total_pod: int, args):
 
 
 def write_output(message: str):
+    # 向标准输出打印信息并立即刷新。
     print(message, file=sys.stdout, flush=True)
 
 
 def write_error(message: str):
+    # 向标准错误输出打印信息并立即刷新。
     print(message, file=sys.stderr, flush=True)
 
 
 def do_leader(args):
+    # leader 入口：等待全部 Pod 就绪后，用 AWS OpenMPI 通过 kubessh 跨节点拉起多 rank 的 tritonserver。
     write_output(
         f"Server is assuming each node has {args.gpu_per_node} GPUs. To change this, use --gpu_per_node"
     )
@@ -172,6 +184,7 @@ def do_leader(args):
 
     write_output(f"Executing Leader (world size: {world_size})")
 
+    # 每个节点一个 Pod，因此需要的 Pod 数 = 总 GPU 数 / 每节点 GPU 数。
     workers = wait_for_workers(world_size / args.gpu_per_node, args)
 
     if len(workers) != (world_size / args.gpu_per_node):
@@ -180,8 +193,10 @@ def do_leader(args):
         )
         die(ERROR_EXIT_DELAY)
 
+    # 为每个 worker 指定 MPI slot 数（即每节点 GPU 数）。
     workers_with_mpi_slots = [worker + f":{args.gpu_per_node}" for worker in workers]
 
+    # 启用 nsys 时用 nsys profile 包裹 mpirun，输出性能剖析报告。
     if args.enable_nsys:
         cmd_args = [
             "/var/run/models/nsight-systems-cli-DVS/bin/nsys",
@@ -206,6 +221,7 @@ def do_leader(args):
     if args.verbose:
         cmd_args += ["--debug-devel"]
 
+    # 通过 kubessh 作为远程 shell 代理，在多个 Pod 上拉起 MPI 进程。
     cmd_args += [
         "--report-bindings",
         "-mca",
@@ -217,11 +233,13 @@ def do_leader(args):
         ",".join(workers_with_mpi_slots),
     ]
 
+    # 为每个节点添加以 ':' 分隔的进程命令行。
     # Add per node command lines separated by ':'.
     for i in range(world_size):
         if i != 0:
             cmd_args += [":"]
 
+        # 每个 rank 独占一个 tritonserver 进程。
         cmd_args += [
             "-n",
             "1",
@@ -234,6 +252,7 @@ def do_leader(args):
             f"--model-repository={args.triton_model_repo_dir}",
         ]
 
+        # rank 0 需要支持指标采集和网络服务。
         # Rank0 node needs to support metrics collection and web services.
         if i == 0:
             cmd_args += [
@@ -247,6 +266,7 @@ def do_leader(args):
             if args.iso8601 > 0:
                 cmd_args += ["--log-format=ISO8601"]
 
+        # 其余 rank 可以关闭指标、网络服务和日志。
         # Rank(N) nodes can disable metrics, web services, and logging.
         else:
             cmd_args += [
@@ -268,6 +288,7 @@ def do_leader(args):
 
 
 def do_worker(args):
+    # worker 入口：注册信号处理器后挂起等待，实际计算由 leader 通过 mpirun 远程拉起。
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -276,6 +297,7 @@ def do_worker(args):
 
 
 def main():
+    # 启动时先打印系统信息（用户、内存限制、GPU 状态），便于排查环境问题。
     write_output("Reporting system information.")
     run_command(["whoami"])
     run_command(
@@ -290,6 +312,7 @@ def main():
     if args.verbose:
         write_output(f"Triton model repository is at:'{args.triton_model_repo_dir}'")
 
+    # 按模式分发执行；leader 模式要求提供每节点 GPU 数和 group-key。
     if args.mode == "leader":
         if args.gpu_per_node is None:
             raise Exception("--gpu_per_node is required for leader mode")

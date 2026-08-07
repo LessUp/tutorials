@@ -16,6 +16,7 @@ import time
 ERROR_CODE_FATAL = 255
 EXIT_CODE_SUCCESS = 0
 
+# 环境变量键名，分别控制调试输出、生成 token 数、模型名和 Triton 服务地址。
 DEBUG_KEY = "TRTLLM_DEBUG"
 MAX_TOKENS_KEY = "TRTLLM_MAX_TOKENS"
 MODEL_NAME_KEY = "TRTLLM_MODEL_NAME"
@@ -25,6 +26,7 @@ MAX_TOKENS_DEFAULT = 512
 
 is_debug = False
 
+# 读取调试开关环境变量，支持 1/true/yes/debug 多种取值。
 debug_value = os.getenv(DEBUG_KEY)
 
 if debug_value is not None:
@@ -35,6 +37,7 @@ if debug_value is not None:
         or debug_value == "debug"
     )
 
+# 模型名是必填环境变量，缺失则直接报错退出。
 model_name = os.getenv(MODEL_NAME_KEY)
 
 if model_name is None:
@@ -43,6 +46,7 @@ if model_name is None:
 if is_debug:
     print(f'model_name: "{model_name}".', file=sys.stdout, flush=True)
 
+# Triton 服务地址是必填环境变量，拼接出 generate 端点的完整 URL。
 triton_url = os.getenv(TRITON_URL_KEY)
 
 if triton_url is None:
@@ -55,6 +59,7 @@ if is_debug:
 
 max_tokens = MAX_TOKENS_DEFAULT
 
+# 读取可选的最大生成 token 数，解析失败时回退到默认值并告警。
 max_token_value = os.getenv(MAX_TOKENS_KEY)
 if max_token_value is not None:
     try:
@@ -71,6 +76,7 @@ if max_token_value is not None:
 if is_debug:
     print(f"max_tokens: {max_tokens}.", file=sys.stdout, flush=True)
 
+# 内置的一组测试提示词，循环轮询使用，用来持续向模型制造推理负载。
 prompts = [
     "What is the market capitalization of NVIDIA?",
     "What is the largest company in the world?",
@@ -92,6 +98,7 @@ prompts = [
 index = 0
 error_count = 0
 
+# 无限循环发送推理请求（除非进程被 SIGABRT/SIGINT/SIGKILL 终止），作为负载生成器持续压测 Triton。
 # Do this forever, or at least until a SIGABRT, SIGINT, or SIGKILL terminates the process.
 while True:
     question = prompts[index]
@@ -99,18 +106,21 @@ while True:
     if is_debug:
         print(f'question: "{question}".')
 
+    # 构造 JSON 编码的推理请求体。
     # Create a JSON encoded inference payload.
     payload = json.dumps({"text_input": question, "max_tokens": max_tokens})
 
     if is_debug:
         print(f'payload: "{payload}".')
 
+    # 用 curl 向 Triton 的 generate 端点发送 POST 请求。
     # Build up the subprocess args.
     args = ["curl", "-X", "POST", "-s", triton_url, "-d", payload]
 
     if is_debug:
         print(f"args: {args}")
 
+    # 拼接成易读的命令行并打印，方便观察当前发送的请求。
     # Concat a human friendly command line and then log it.
     command = ""
     for arg in args:
@@ -119,9 +129,11 @@ while True:
 
     print(f"> {command}", file=sys.stdout, flush=True)
 
+    # 轮询切换提示词。
     index += 1
     index %= len(prompts)
 
+    # 执行请求并处理失败。
     # Run the subprocess and catch any failures.
     try:
         time_start = time.time()
@@ -136,6 +148,7 @@ while True:
 
         time_end = time.time()
 
+        # 打印本次请求的耗时。
         print(
             f"  completed in {(time_end - time_start)} seconds.",
             file=sys.stdout,
@@ -148,6 +161,7 @@ while True:
         if is_debug:
             print(f'output: "{output}".', file=sys.stdout, flush=True)
 
+        # 解析 JSON 响应，取出生成的文本。
         result = json.loads(output)
 
         if is_debug:
@@ -158,6 +172,7 @@ while True:
         if is_debug:
             print(f'text_output: "{text_output}".', file=sys.stdout, flush=True)
 
+        # 按两个以上空格或换行切分输出文本，逐段打印回答。
         answers = re.split("(\s{2,}|\n)", text_output)
 
         print("Prompt:", file=sys.stdout, flush=True)
@@ -172,6 +187,7 @@ while True:
         print(" ", file=sys.stdout, flush=True)
 
     except Exception as exception:
+        # 连续失败 30 次后认为服务不可用，直接退出。
         error_count += 1
 
         print(" ", file=sys.stderr, flush=True)
@@ -186,6 +202,7 @@ while True:
             print(f"fatal: Quitting after 30 failures.", file=sys.stderr, flush=True)
             exit(ERROR_CODE_FATAL)
 
+    # 两次推理请求之间延迟 250ms，控制请求频率。
     # 250ms delay between inference requests.
     time.sleep(0.250)
     print(" ", file=sys.stdout, flush=True)

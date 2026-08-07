@@ -15,12 +15,14 @@
 --->
 
 
-# Container Generation
+# 容器镜像构建
 
-The files in this folder are intended to be used to create the custom container image for multi-node Triton + TRT-LLM EKS deployment including installation of EFA components.
+本目录下的文件用于构建多节点 Triton + TRT-LLM EKS 部署所需的定制容器镜像，其中包含 EFA 组件的安装。
 
-Run the following command to create the container image.
+运行以下命令构建容器镜像：
 
 ```bash
 docker build --file ./triton_trt_llm.containerfile --tag <image_name_here> .
 ```
+
+> 💡 **AI Infra 视角**：这个镜像是在 NGC 官方 Triton TRT-LLM 镜像之上叠加 EFA 库和 kubessh 工具链做成的"胖镜像"。多节点 MPI 分布式推理对节点间的通信软件栈要求苛刻（需要与内核模块匹配的 libfabric/EFA 库版本），所以通常不会在运行时临时安装，而是直接打进镜像，保证每个节点上的环境完全一致，这也是镜像分层构建的典型实践。
