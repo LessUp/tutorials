@@ -26,98 +26,85 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Building Triton Inference Server for RHEL / manylinux
+# 为 RHEL / manylinux 构建 Triton Inference Server
 
 > [!WARNING]
-> **This is a community example — not officially supported.** Triton's
-> `build.py --target-platform=rhel` path is experimental (RHEL is not an officially
-> supported target), and the base image reconstructed in this tutorial is equivalent,
-> not identical, to the one NVIDIA uses internally to produce the released `manylinux`
-> artifacts.
+> **这是社区示例——并非官方支持。** Triton 的
+> `build.py --target-platform=rhel` 路径目前是实验性的（RHEL 不是官方支持的目标平台），
+> 本教程重建的基础镜像与 NVIDIA 内部用于产出官方 `manylinux`
+> 构件的镜像是**等价**的，但并不**完全相同**。
 
-NVIDIA publishes prebuilt `manylinux` (RHEL 8‑compatible) Triton Inference Server
-artifacts. Reproducing them ourselves with `build.py --target-platform=rhel` requires a
-CUDA/cuDNN/TensorRT base image that is not published, so this tutorial reconstructs an
-equivalent one from public sources — a public NVIDIA CUDA image on Rocky Linux 8 plus
-TensorRT from the public CUDA repo — and walks through building and running a
-RHEL/manylinux Triton server end‑to‑end.
+NVIDIA 会发布预编译的 `manylinux`（兼容 RHEL 8）Triton Inference Server 构件。要用
+`build.py --target-platform=rhel` 自行复现，需要一份没有公开发布的
+CUDA/cuDNN/TensorRT 基础镜像，所以本教程从公开来源重建一个等价镜像——基于 Rocky Linux 8
+的公共 NVIDIA CUDA 镜像，加上来自公共 CUDA 仓库的 TensorRT——并完整走一遍
+RHEL/manylinux Triton 服务器的构建与运行流程。
 
-By the end of this tutorial, we will produce the following:
+> 💡 **AI Infra 视角**：RHEL 是企业生产环境最常见的 Linux 发行版之一——长期支持、安全补丁和厂商背书让它成为金融、制造等行业的默认选择。但 Triton 官方预编译构件主要面向 Ubuntu，很多企业因此卡在"官方支持矩阵之外"。这篇教程的价值就在于：把 RHEL 生态下的构建能力掌握在自己手里，而不依赖 NVIDIA 是否官方支持。
 
-1. **The manylinux artifacts.** `build/install/` holds the `tritonserver` / `tritonfrontend`
-   wheels tagged `…-cp312-cp312-manylinux_2_XX_x86_64.whl` plus the backend trees we build (e.g. `onnxruntime`, `pytorch`, `python`) — all from 100% public inputs.
-2. **A working, provably-manylinux container.** The built image serves real inference, and both
-   the wheels and the runtime are verified to conform to `manylinux` (glibc 2.28 / EL8),
-   so it runs on RHEL 8 and derivatives (Rocky, AlmaLinux, …). Running on RHEL 9 works too, but
-   the server binary needs OpenSSL 1.1 (`libssl.so.1.1`) there (see
-   [Known differences](#known-differences-from-the-released-artifacts)).
+本教程结束时，我们将产出以下成果：
 
-The commands below target **Triton 2.69.0 / NGC 26.05** (CUDA 13.2.1, TensorRT
-10.16.1.11, PyTorch 2.13.0, Python 3.12).
+1. **manylinux 构件。** `build/install/` 中存放 `tritonserver` / `tritonfrontend` 的
+   wheel（标签形如 `…-cp312-cp312-manylinux_2_XX_x86_64.whl`），以及我们构建的后端树（如 `onnxruntime`、`pytorch`、`python`）——全部来自 100% 公开的输入。
+2. **一个可用且可验证的 manylinux 容器。** 构建出的镜像能真实跑推理，wheel 和运行时都经验证符合 `manylinux` 规范（glibc 2.28 / EL8），因此可以在 RHEL 8 及其衍生版（Rocky、AlmaLinux 等）上运行。在 RHEL 9 上也能跑，但服务器二进制需要 OpenSSL 1.1（`libssl.so.1.1`）（见[与官方构件的差异](#与官方构件的已知差异)）。
+
+下面命令的目标版本为 **Triton 2.69.0 / NGC 26.05**（CUDA 13.2.1、TensorRT 10.16.1.11、PyTorch 2.13.0、Python 3.12）。
 
 > [!IMPORTANT]
-> **Targeting a different Triton release?** Look up the matching CUDA, TensorRT,
-> PyTorch, and Python versions in NVIDIA's
+> **想针对其他 Triton 版本？** 先在 NVIDIA 的
 > [Framework Support Matrix](https://docs.nvidia.com/deeplearning/frameworks/support-matrix/index.html)
-> and the [Triton Inference Server release notes](https://docs.nvidia.com/deeplearning/triton-inference-server/release-notes/index.html),
-> then update **all** of these to match:
+> 和 [Triton Inference Server 发布说明](https://docs.nvidia.com/deeplearning/triton-inference-server/release-notes/index.html)
+> 中查好对应的 CUDA、TensorRT、PyTorch 和 Python 版本，然后把以下**所有**参数同步更新：
 >
-> - `--build-arg BASE_IMAGE=...` (Step 1)
-> - `--build-arg TENSORRT_VERSION=...` (Step 1)
-> - `--build-arg TORCH_VERSION=...` **in both** [`Dockerfile.pytorch.rhel`](Dockerfile.pytorch.rhel)
->   **and** [`Dockerfile.pytorch-runtime.rhel`](Dockerfile.pytorch-runtime.rhel) (Steps 2 and 4)
-> - `--build-arg TORCH_INDEX_URL=...` if the CUDA channel changes (e.g. `cu132` → `cu133`)
-> - `--version`, `--container-version`, `--upstream-container-version`, and every
->   `--repo-tag`/`--backend=X:tag` in the `build.py` invocation (Step 3)
+> - `--build-arg BASE_IMAGE=...`（第 1 步）
+> - `--build-arg TENSORRT_VERSION=...`（第 1 步）
+> - `--build-arg TORCH_VERSION=...`——[`Dockerfile.pytorch.rhel`](Dockerfile.pytorch.rhel)
+>   **和** [`Dockerfile.pytorch-runtime.rhel`](Dockerfile.pytorch-runtime.rhel) **两处都要改**（第 2 步和第 4 步）
+> - `--build-arg TORCH_INDEX_URL=...`——如果 CUDA 通道变了（例如 `cu132` → `cu133`）
+> - `build.py` 调用里的 `--version`、`--container-version`、`--upstream-container-version` 以及每个 `--repo-tag`/`--backend=X:tag`（第 3 步）
 >
-> Torch in particular must be the **same version** in both Dockerfiles — a mismatch
-> ABI-breaks at server load, not at build time.
+> 尤其是 torch，两个 Dockerfile 里的版本必须**一致**——版本不匹配会在服务器加载时
+> 触发 ABI 崩溃，而不是在构建时报错。
 
-## Prerequisites
+## 前置条件
 
-- A **Linux x86-64 host with a working Docker daemon.** This tutorial builds with `build.py`
-  the same way a standard Triton build does; Triton's supported build platform is
-  [Ubuntu 22.04, x86-64](https://github.com/triton-inference-server/server/blob/main/docs/customization_guide/build.md).
-  Since the build runs in containers, other x86-64 Linux hosts with Docker should work too.
-  A **GPU is not required to build** since
-  CUDA libraries come from the base image; you only need a GPU to run GPU inference.
-- **Disk space and build time depend on which backends you build.** Building the `onnxruntime`
-  backend from source alone takes ~2 hours and tens of GB; a minimal build is much quicker.
-- Network access to the public **NVIDIA** package repos, **PyPI**, and **GitHub**
-  (`build.py` clones the backend sources).
-- [`Dockerfile.base.rhel`](Dockerfile.base.rhel) — **required**; the base image every
-  `--target-platform=rhel` build needs.
-- [`Dockerfile.pytorch.rhel`](Dockerfile.pytorch.rhel) — **optional**; only if you
-  build the `pytorch` backend (Step 2).
-- [`Dockerfile.pytorch-runtime.rhel`](Dockerfile.pytorch-runtime.rhel) — **optional**;
-  completes the built image so the `pytorch` backend can serve (Step 4).
+- **一台 Linux x86-64 主机，Docker daemon 可用。** 本教程和标准 Triton 构建一样使用 `build.py`；Triton 官方支持的构建平台是
+  [Ubuntu 22.04, x86-64](https://github.com/triton-inference-server/server/blob/main/docs/customization_guide/build.md)。
+  由于构建在容器中进行，其他装了 Docker 的 x86-64 Linux 主机理论上也能工作。
+  **构建不需要 GPU**——CUDA 库来自基础镜像；只有跑 GPU 推理时才需要 GPU。
+- **磁盘空间和构建时间取决于构建哪些后端。** 仅从源码构建 `onnxruntime`
+  后端就需要约 2 小时和几十 GB 空间；最小化构建则快得多。
+- 能访问公共的 **NVIDIA** 软件包仓库、**PyPI** 和 **GitHub**
+  （`build.py` 会克隆后端源码）。
+- [`Dockerfile.base.rhel`](Dockerfile.base.rhel) —— **必需**；任何
+  `--target-platform=rhel` 构建都需要这个基础镜像。
+- [`Dockerfile.pytorch.rhel`](Dockerfile.pytorch.rhel) —— **可选**；仅当构建
+  `pytorch` 后端时需要（第 2 步）。
+- [`Dockerfile.pytorch-runtime.rhel`](Dockerfile.pytorch-runtime.rhel) —— **可选**；
+  补全构建镜像，让 `pytorch` 后端能对外服务（第 4 步）。
 
 > [!NOTE]
-> **Choosing backends.** Skip any backend by leaving its `--backend=` flag out of Step 3;
-> dropping `onnxruntime` also avoids the ~2h source build. The PyTorch image (Step 2) is only
-> needed for the `pytorch` backend.
+> **选择后端。** 第 3 步的命令里去掉某个 `--backend=` 参数即可跳过对应后端；
+> 去掉 `onnxruntime` 还能省下约 2 小时的源码构建。PyTorch 镜像（第 2 步）仅为 `pytorch` 后端所需。
 >
-> TensorRT is the exception: a GPU `onnxruntime` build auto-enables ONNX Runtime's
-> TensorRT provider (when building for `rhel` on x86-64), so it's pulled in even without
-> the `tensorrt` backend. For a TensorRT-free build, either skip both `onnxruntime` and
-> `tensorrt`, or keep `onnxruntime` and disable the provider with
-> `--override-backend-cmake-arg onnxruntime:TRITON_ENABLE_ONNXRUNTIME_TENSORRT=OFF`; then
-> drop the TensorRT step from `Dockerfile.base.rhel`.
+> TensorRT 是个例外：在 x86-64 上为 `rhel` 构建 GPU 版 `onnxruntime` 时，会自动启用 ONNX Runtime 的
+> TensorRT provider，所以即使不选 `tensorrt` 后端也会把它带进来。想要不含 TensorRT 的构建，
+> 要么同时去掉 `onnxruntime` 和 `tensorrt`，要么保留 `onnxruntime` 并用
+> `--override-backend-cmake-arg onnxruntime:TRITON_ENABLE_ONNXRUNTIME_TENSORRT=OFF` 禁用该 provider；
+> 同时把 TensorRT 步骤从 `Dockerfile.base.rhel` 中去掉。
 
-## Step 1: Build the public base image
+## 第 1 步：构建公共基础镜像
 
-On the `rhel` path, `build.py` only installs DCGM (NVIDIA's Data Center GPU Manager) and
-expects the CUDA/cuDNN/TensorRT stack and a set of OS `-devel` packages to already be
-present in the base image. [`Dockerfile.base.rhel`](Dockerfile.base.rhel) reconstructs
-that from public sources: it starts from NVIDIA's official
-`nvidia/cuda:*-cudnn-devel-rockylinux8` image (CUDA + cuDNN, on Rocky Linux 8 = RHEL 8 /
-glibc 2.28), enables **EPEL + PowerTools**, installs **TensorRT** from the public
-`cuda-rhel8` repo, and adds the compiler toolchain, Python headers, and wheel tooling that
-`build.py` assumes. (PyTorch's extra CUDA runtime libraries — cuSPARSELt, NCCL, nvshmem — are
-*not* added here; they ship inside the torch wheel and get wired up in the Step 4 completion
-image, so the base stays generic).
+在 `rhel` 路径下，`build.py` 只负责安装 DCGM（NVIDIA 数据中心 GPU 管理器），
+CUDA/cuDNN/TensorRT 技术栈和一批操作系统 `-devel` 包需要基础镜像中已经备好。
+[`Dockerfile.base.rhel`](Dockerfile.base.rhel) 从公开来源重建了这一切：以 NVIDIA 官方
+`nvidia/cuda:*-cudnn-devel-rockylinux8` 镜像为起点（CUDA + cuDNN，基于 Rocky Linux 8 = RHEL 8 /
+glibc 2.28），启用 **EPEL + PowerTools**，从公共 `cuda-rhel8` 仓库安装 **TensorRT**，
+并补齐 `build.py` 所需的编译器工具链、Python 头文件和 wheel 工具链。
+（PyTorch 额外的 CUDA 运行时库——cuSPARSELt、NCCL、nvshmem——*不*在这里添加；
+它们随 torch wheel 一起分发，在第 4 步的补全镜像中接线，基础镜像因此保持通用。）
 
-To build this image, run the following command, pinning the CUDA image and TensorRT to your release versions:
+构建该镜像，运行下面的命令，把 CUDA 镜像和 TensorRT 固定到你的发布版本：
 
 ```bash
 docker build -f Dockerfile.base.rhel \
@@ -126,13 +113,14 @@ docker build -f Dockerfile.base.rhel \
   -t triton-manylinux-base:example .
 ```
 
-## Step 2 (optional): Build the PyTorch backend image
+> 💡 **AI Infra 视角**：官方已经发布了预编译 wheel，为什么还要从源码构建？对企业 AI Infra 来说，可复现性比"省事"更重要：自建构建流水线意味着可以固定每个依赖版本、把产物纳入自己的供应链，还能覆盖官方支持矩阵之外的平台。容器在这里是构建隔离的关键——所有编译都在镜像内进行，宿主机只需要一个 Docker daemon，构建环境不会与生产环境互相污染。
 
-Only needed if you build the `pytorch` backend.
-[`Dockerfile.pytorch.rhel`](Dockerfile.pytorch.rhel) installs a public `torch` wheel into a
-`manylinux_2_28` image so the PyTorch backend can extract a libtorch that runs on EL8's
-glibc 2.28. Note that the default Ubuntu-based `libtorch` is built against a newer glibc and won't
-load there.
+## 第 2 步（可选）：构建 PyTorch 后端镜像
+
+仅构建 `pytorch` 后端时需要。
+[`Dockerfile.pytorch.rhel`](Dockerfile.pytorch.rhel) 将一个公共 `torch` wheel 安装到
+`manylinux_2_28` 镜像中，这样 PyTorch 后端就能提取出可在 EL8 的 glibc 2.28 上运行的 libtorch。
+注意，默认基于 Ubuntu 的 `libtorch` 是针对更新的 glibc 构建的，在那里无法加载。
 
 ```bash
 docker build -f Dockerfile.pytorch.rhel \
@@ -140,8 +128,8 @@ docker build -f Dockerfile.pytorch.rhel \
   -t triton-manylinux-pytorch:example .
 ```
 
-Note that `build.py` consumes `--image=pytorch` with an unconditional `docker pull` (even under
-`--no-container-pull`), so the image must be reachable from a registry. Push it to a temporary local one:
+注意：`build.py` 消费 `--image=pytorch` 时无条件执行 `docker pull`（即使在
+`--no-container-pull` 下也一样），所以该镜像必须能从某个 registry 拉取。把它推送到一个临时本地 registry：
 
 ```bash
 docker run -d -p 5000:5000 --name registry registry:2
@@ -149,13 +137,11 @@ docker tag  triton-manylinux-pytorch:example localhost:5000/triton-manylinux-pyt
 docker push localhost:5000/triton-manylinux-pytorch:example
 ```
 
-Then add the PyTorch flags to the Step 3 command (shown there), and complete the serving image
-in Step 4. `localhost:5000` is just a stand-in for NVIDIA's internal registry.
+然后给第 3 步的命令加上 PyTorch 相关参数（见下文），并在第 4 步补全服务镜像。`localhost:5000` 只是 NVIDIA 内部 registry 的替身。
 
-## Step 3: Build the server
+## 第 3 步：构建服务器
 
-Clone the server repo at the matching release branch and run `build.py` with your base
-image:
+克隆 server 仓库并切换到对应的发布分支，然后带上你的基础镜像运行 `build.py`：
 
 ```bash
 git clone https://github.com/triton-inference-server/server.git
@@ -175,50 +161,31 @@ cd server && git checkout r26.05  # choose any release version
   --repoagent=checksum:r26.05
 ```
 
-Key flags:
+关键参数：
 
-- `--no-container-pull` — assuming your base image is local, this stops Docker from
-  trying to pull it. It does **not** stop the pytorch backend's own pull of `--image=pytorch`
-  — that's why Step 2 pushes to a local registry.
-- If you're running headless (CI, `ssh` without a TTY, etc.), add `--no-container-interactive` —
-  build.py launches the compile with `docker run -it` by default, which aborts with
-  `the input device is not a TTY` when no terminal is attached.
-- `--extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON` — makes pybind11 use the Python 3.12 you
-  installed instead of Rocky 8's system `python3` (3.6), which it otherwise picks up and, lacking
-  dev headers, fails against with `fatal error: Python.h`.
-- `--image=pytorch,localhost:5000/…` — the prebuilt PyTorch image from Step 2. The other backends
-  (onnxruntime, tensorrt, python) compile from source during the build; PyTorch instead reuses a
-  **prebuilt** libtorch (too heavy to build in-tree), which build.py `docker pull`s and extracts from
-  this image — the only backend that needs an `--image`.
-- `TRITON_PYTORCH_ENABLE_TORCHVISION=OFF` — this example builds without torchvision;
-  wiring torchvision up from public sources is an untested path in this tutorial.
-- `TRITON_PYTORCH_NVSHMEM=ON` — leave nvshmem on so build.py copies `libtorch_nvshmem.so`
-  (libtorch links it); Step 4 supplies the one runtime library it in turn needs.
+- `--no-container-pull` —— 假设你的基础镜像在本地，这个参数阻止 Docker 尝试拉取它。它**不会**阻止 pytorch 后端自己对 `--image=pytorch` 的拉取——这正是第 2 步要推送到本地 registry 的原因。
+- 无头环境（CI、无 TTY 的 `ssh` 等）运行时加上 `--no-container-interactive`——build.py 默认用 `docker run -it` 启动编译，没有终端时会报 `the input device is not a TTY` 并中止。
+- `--extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON` —— 让 pybind11 使用你安装的 Python 3.12，而不是 Rocky 8 自带的系统 `python3`（3.6）；后者缺少开发头文件，会以 `fatal error: Python.h` 失败。
+- `--image=pytorch,localhost:5000/…` —— 第 2 步构建好的 PyTorch 镜像。其他后端（onnxruntime、tensorrt、python）在构建期间从源码编译；PyTorch 则复用**预构建**的 libtorch（在构建树内编译太重），由 build.py `docker pull` 该镜像并从中解压——它是唯一需要 `--image` 的后端。
+- `TRITON_PYTORCH_ENABLE_TORCHVISION=OFF` —— 本示例不构建 torchvision；在本教程中，从公开来源接线 torchvision 是一条未经验证的路径。
+- `TRITON_PYTORCH_NVSHMEM=ON` —— 保持 nvshmem 开启，这样 build.py 会复制 `libtorch_nvshmem.so`（libtorch 链接了它）；第 4 步会补上它运行时所需的那个库。
 
-The `python` backend is built here because it makes build.py provision the pyenv Python + numpy
-the pytorch backend serves against (Step 4). It's optional — drop `--backend=python` and you must
-re-add those to the completion image yourself. `tensorrt` is optional too (ONNX Runtime already
-pulls in its TensorRT provider); add `--backend=tensorrt:r26.05` for the standalone backend.
+这里构建 `python` 后端，是为了让 build.py 配好 pytorch 后端对外服务所需的 pyenv Python 和 numpy（第 4 步）。它是可选的——去掉 `--backend=python` 的话，需要自己在补全镜像中重新加回这些东西。`tensorrt` 也是可选的（ONNX Runtime 已自带 TensorRT provider）；需要独立后端时再加 `--backend=tensorrt:r26.05`。
 
-Triton's `common`, `core`, `backend`, and `third_party` repos don't need explicit
-`--repo-tag` flags — build.py defaults them to the branch matching `--container-version`
-(`r26.05` here).
+Triton 的 `common`、`core`、`backend` 和 `third_party` 仓库不需要显式传 `--repo-tag` 参数——build.py 默认把它们固定到与 `--container-version`（此处为 `r26.05`）匹配的分支。
 
-ONNX Runtime is compiled from source here (~2 hours — it builds CUDA kernels for several
-GPU architectures). To speed it up, build for only your GPU's architecture — see the
-[`onnxruntime_backend`](https://github.com/triton-inference-server/onnxruntime_backend) build options.
+ONNX Runtime 在这里从源码编译（约 2 小时——要为多种 GPU 架构编译 CUDA kernel）。想加速的话，只为你 GPU 的架构构建——参见 [`onnxruntime_backend`](https://github.com/triton-inference-server/onnxruntime_backend) 的构建选项。
 
-The build produces the install tree under `build/install/` and a local `tritonserver`
-Docker image.
+构建产物位于 `build/install/` 下，同时生成一个本地 `tritonserver` Docker 镜像。
 
-## Step 4: Verify
+## 第 4 步：验证
 
-**1. Manylinux artifact generation**
+**1. manylinux 构件生成**
 
 > [!NOTE]
-> The `rhel` build currently **ships wheels tagged `linux_x86_64`, not `manylinux`.** It *does*
-> run `auditwheel repair` and produce correct `manylinux_2_27` wheels (under the build container's
-> `.../python/generic/` dirs), but the packaging step installs the *un-repaired* copies instead. As a workaround, pull the repaired wheels out of the build container:
+> 当前 `rhel` 构建**产出的 wheel 标签是 `linux_x86_64`，而不是 `manylinux`。** 它*确实*会
+> 运行 `auditwheel repair` 并生成正确的 `manylinux_2_27` wheel（位于构建容器的
+> `.../python/generic/` 目录下），但打包步骤安装的是*未修复*的副本。变通办法：把修复好的 wheel 从构建容器中取出来：
 
 ```bash
 docker start tritonserver_builder >/dev/null
@@ -230,9 +197,7 @@ find build/install/python -name '*manylinux*.whl' | grep -q . \
 rm -f build/install/python/*-linux_x86_64.whl
 ```
 
-Now `ls` the artifacts and prove the tag is real (not just a filename) with `auditwheel`, which
-checks the wheel's external symbols actually fit within the target glibc (auditwheel picks the
-true minimum — `2_27` here, which is *more* portable than 2_28):
+现在 `ls` 一下构件，并用 `auditwheel` 证明标签货真价实（不只是文件名）——auditwheel 会检查 wheel 的外部符号是否真的落在目标 glibc 版本之内（auditwheel 会挑出真实的最低版本——这里是 `2_27`，比 2_28 *更*可移植）：
 
 ```bash
 ls build/install/backends                 # onnxruntime  pytorch  python
@@ -245,12 +210,9 @@ docker run --rm -v "$PWD/build:/b:ro" triton-manylinux-base:example \
 #  ... external versioned symbols in system libraries: libc.so.6 (GLIBC_2.2.5 ... 2.27)
 ```
 
-**2. Serve real workloads from Manylinux container**
+**2. 从 manylinux 容器跑真实负载**
 
-Run the server and real inference. The
-server binary links against EL8's `libssl.so.1.1`, so run it **inside the built image** (Rocky 8)
-rather than on a non‑EL8 host. First create a model repository with two
-`OUTPUT0 = INPUT0 + INPUT1` models — one Python, one ONNX.
+启动服务器并跑真实推理。服务器二进制链接的是 EL8 的 `libssl.so.1.1`，所以要在**构建出的镜像内**（Rocky 8）运行，而不是在非 EL8 宿主机上。先创建一个模型仓库，包含两个 `OUTPUT0 = INPUT0 + INPUT1` 模型——一个 Python 后端，一个 ONNX。
 
 ```bash
 # python backend model
@@ -309,8 +271,7 @@ docker run --rm -v "$PWD/models:/models" -v /tmp/gen_onnx.py:/gen.py:ro python:3
   bash -c "pip install --quiet onnx && python /gen.py"
 ```
 
-Start the server (CPU‑only, so no GPU is required for this check). If port `8000` is already in
-use, map a free host port instead, e.g. `-p 8080:8000`, then use `localhost:8080` below:
+启动服务器（仅 CPU，因此该检查不需要 GPU）。如果 `8000` 端口已被占用，就映射一个空闲的主机端口，例如 `-p 8080:8000`，然后使用下面的 `localhost:8080`：
 
 ```bash
 docker run --rm -p8000:8000 -p8001:8001 -v "$PWD/models:/models" \
@@ -318,7 +279,7 @@ docker run --rm -p8000:8000 -p8001:8001 -v "$PWD/models:/models" \
 # wait for: "successfully loaded 'add_py'" / "'add_onnx'" and "Started HTTPService"
 ```
 
-In a second terminal, send inference:
+在第二个终端中发送推理请求：
 
 ```bash
 curl -s localhost:8000/v2/health/ready -o /dev/null -w "ready: %{http_code}\n"
@@ -330,19 +291,19 @@ for m in add_py add_onnx; do echo "== $m =="; curl -s localhost:8000/v2/models/$
     {"name":"INPUT1","shape":[4],"datatype":"FP32","data":[10,20,30,40]}]}'; echo; done
 ```
 
-Expected: `ready: 200`, and both models return `OUTPUT0 = [11, 22, 33, 44]`. A correct
-`add_onnx` result means the `onnxruntime` backend serves correctly on the reconstructed public base. Stop the server with `Ctrl‑C`.
+预期结果：`ready: 200`，两个模型都返回 `OUTPUT0 = [11, 22, 33, 44]`。`add_onnx` 结果正确，说明 `onnxruntime` 后端在重建的公共基础镜像上服务正常。用 `Ctrl‑C` 停止服务器。
 
-### PyTorch backend
+> 💡 **AI Infra 视角**：manylinux 是 Python 生态"一次构建、跨发行版运行"的规范：wheel 的平台标签声明它能兼容的最低 glibc 版本（如 `manylinux_2_27`），auditwheel 通过检查二进制实际引用的 glibc 符号来验证标签是否属实。对企业部署而言，这意味着同一份 Triton wheel 可以同时部署到 RHEL 8、Rocky、AlmaLinux 等不同发行版，不用每换一个系统就重新编译一遍。
 
-The `pytorch` backend is verified **separately, in its own model repo** (`models_torch/`, GPU). First complete the serving image: [`Dockerfile.pytorch-runtime.rhel`](Dockerfile.pytorch-runtime.rhel) adds `torch` into the pyenv Python the `python` backend already provisioned:
+### PyTorch 后端
+
+`pytorch` 后端要在**独立的模型仓库**（`models_torch/`，GPU）中**单独**验证。先补全服务镜像：[`Dockerfile.pytorch-runtime.rhel`](Dockerfile.pytorch-runtime.rhel) 会把 `torch` 安装到 `python` 后端已经配好的 pyenv Python 里：
 
 ```bash
 docker build -f Dockerfile.pytorch-runtime.rhel -t tritonserver-pytorch:example .
 ```
 
-Add a TorchScript `OUTPUT__0 = INPUT__0 + INPUT__1` model (the PyTorch backend uses the
-`INPUT__N` / `OUTPUT__N` naming convention):
+加一个 TorchScript 模型 `OUTPUT__0 = INPUT__0 + INPUT__1`（PyTorch 后端使用 `INPUT__N` / `OUTPUT__N` 命名约定）：
 
 ```bash
 mkdir -p models_torch/add_torch/1
@@ -369,8 +330,7 @@ docker run --rm -v "$PWD/models_torch:/models" -v /tmp/gen_pt.py:/gen.py:ro \
   triton-manylinux-pytorch:example python /gen.py
 ```
 
-Serve with the completed image (`KIND_GPU`, so a GPU is required) and infer. (Again, if `8000` is
-taken, map a free host port — `-p 8080:8000`, then `localhost:8080`.)
+用补全后的镜像对外服务（`KIND_GPU`，因此需要 GPU）并推理。（同样，如果 `8000` 被占用，映射一个空闲端口——`-p 8080:8000`，然后 `localhost:8080`。）
 
 ```bash
 docker run --rm --gpus all -p8000:8000 -v "$PWD/models_torch:/models" \
@@ -383,22 +343,19 @@ curl -s localhost:8000/v2/models/add_torch/infer -H 'Content-Type: application/j
     {"name":"INPUT__1","shape":[4],"datatype":"FP32","data":[10,20,30,40]}]}'; echo
 ```
 
-Expected: `OUTPUT__0 = [11, 22, 33, 44]` — the PyTorch backend, built entirely from public
-sources, serving correct inference.
+预期结果：`OUTPUT__0 = [11, 22, 33, 44]`——完全从公开源码构建的 PyTorch 后端，推理结果正确。
 
-## Known differences from the released artifacts
+## 与官方构件的已知差异
 
-This build is *equivalent*, not identical, to the official `manylinux` release:
+这次构建与官方 `manylinux` 发布版*等价*，但并不*完全相同*：
 
-- **Pin versions for parity.** `BASE_IMAGE` and `TENSORRT_VERSION` (Step 1) and
-  `--version` / `--container-version` (Step 3) must all match the target release.
-  Cross‑check against the release's artifact name
-  (`…-cu132-cp312-manylinux_2_28-x86_64.zip`) and the framework support matrix.
-- **cuDNN** comes from the public CUDA base image and may be a slightly newer patch than the
-  release used; if you need an exact match, install a specific cuDNN RPM from the `cuda-rhel8`
-  repo in `Dockerfile.base.rhel`.
-- **Running the binary** requires EL8's `libssl.so.1.1`. Run it inside the built image /
-  on an EL8 host, or bundle OpenSSL 1.1 alongside the executable.
+- **钉死版本以保证一致。** `BASE_IMAGE` 和 `TENSORRT_VERSION`（第 1 步）以及
+  `--version` / `--container-version`（第 3 步）都必须与目标发布版一致。
+  可以对照发布版的构件名（`…-cu132-cp312-manylinux_2_28-x86_64.zip`）和框架支持矩阵交叉核对。
+- **cuDNN** 来自公共 CUDA 基础镜像，补丁版本可能比发布版用的稍新；如果需要完全一致，
+  在 `Dockerfile.base.rhel` 中从 `cuda-rhel8` 仓库安装指定版本的 cuDNN RPM。
+- **运行二进制**需要 EL8 的 `libssl.so.1.1`。请在构建出的镜像内 / EL8 主机上运行，
+  或者把 OpenSSL 1.1 随可执行文件一起打包。
 
-For background on `build.py` and its options, see the server repo's
-[build documentation](https://github.com/triton-inference-server/server/blob/main/docs/customization_guide/build.md).
+关于 `build.py` 及其参数的背景知识，参见 server 仓库的
+[构建文档](https://github.com/triton-inference-server/server/blob/main/docs/customization_guide/build.md)。
