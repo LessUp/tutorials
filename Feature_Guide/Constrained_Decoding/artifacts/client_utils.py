@@ -34,17 +34,20 @@ import tritonclient.grpc as grpcclient
 from tritonclient.utils import InferenceServerException, np_to_triton_dtype
 
 
+# 把 NumPy 数组包装成 Triton 的 InferInput（声明名字、形状、数据类型并填充数据）
 def prepare_tensor(name, input):
     t = grpcclient.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
     t.set_data_from_numpy(input)
     return t
 
 
+# 用队列保存流式推理的异步回调结果
 class UserData:
     def __init__(self):
         self._completed_requests = queue.Queue()
 
 
+# 流式推理回调：把结果或错误放入队列，供主流程轮询取出
 def callback(user_data, result, error):
     if error:
         user_data._completed_requests.put(error)
@@ -85,6 +88,7 @@ def run_inference(
     beam_width_data = np.array([[beam_width]], dtype=np.int32)
     temperature_data = np.array([[temperature]], dtype=np.float32)
 
+    # 组装基础输入张量：文本、最大生成长度、是否流式、beam 宽度、温度
     inputs = [
         prepare_tensor("text_input", input0_data),
         prepare_tensor("max_tokens", output0_len),
@@ -176,6 +180,7 @@ def run_inference(
 
     user_data = UserData()
     # Establish stream
+    # 建立流式推理连接并异步发送请求，回调把结果写入队列
     triton_client.start_stream(callback=partial(callback, user_data))
     # Send request
     triton_client.async_stream_infer(model_name, inputs, request_id=request_id)
@@ -184,6 +189,7 @@ def run_inference(
     triton_client.stop_stream()
 
     # Parse the responses
+    # 轮询队列直到流结束：流式 + beam_width==1 时逐片拼接输出文本
     output_text = ""
     while True:
         try:

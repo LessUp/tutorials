@@ -47,6 +47,8 @@ from tritonclient.utils import InferenceServerException, np_to_triton_dtype
 # TOOLS Definition and Implementation                                         #
 ###############################################################################
 
+# 工具定义：每个工具包含 name、description 和参数 JSON Schema，
+# 会随系统提示词一起注入 prompt，供 LLM 识别和调用
 TOOLS = [
     {
         "type": "function",
@@ -87,7 +89,9 @@ TOOLS = [
 ]
 
 
+# 工具实现：MyFunctions 中每个方法与 TOOLS 定义中的工具名一一对应，供客户端实际执行
 class MyFunctions:
+    # 通过 yfinance 获取指定股票代码的公司新闻标题列表
     def get_company_news(self, symbol: str) -> pd.DataFrame:
         """
         Get company news and press releases for a given stock symbol.
@@ -108,6 +112,7 @@ class MyFunctions:
             print(f"Error fetching company news for {symbol}: {e}")
             return pd.DataFrame()
 
+    # 通过 yfinance 获取指定股票代码的当前股价（优先用常规交易时段价格）
     def get_current_stock_price(self, symbol: str) -> float:
         """
         Get the current stock price for a given symbol.
@@ -135,6 +140,8 @@ class MyFunctions:
 ###############################################################################
 
 
+# 函数调用输出的 JSON schema：step（步骤号）+ tool（工具名）+ arguments（参数），
+# 可作为约束解码（Logits Post-Processor）的 schema，保证 LLM 输出合法 JSON
 class FunctionCall(BaseModel):
     step: str
     """Step number for the action sequence"""
@@ -153,6 +160,7 @@ class FunctionCall(BaseModel):
     """
 
 
+# 系统提示词 schema：对应 system_prompt_schema.yml 中的五个字段（角色/目标/工具/Schema/指令）
 class PromptSchema(BaseModel):
     Role: str
     """Defines the specific role the LLM is expected to perform."""
@@ -174,6 +182,7 @@ class PromptSchema(BaseModel):
 ###############################################################################
 
 
+# 读取 YAML 系统提示词文件并转成 PromptSchema 对象
 def read_yaml_file(file_path: str) -> PromptSchema:
     """
     Reads a YAML file and converts its content into a PromptSchema object.
@@ -197,6 +206,7 @@ def read_yaml_file(file_path: str) -> PromptSchema:
     return prompt_schema
 
 
+# 把工具列表和 schema 等变量格式化进提示词模板，生成最终系统提示词
 def format_yaml_prompt(prompt_schema: PromptSchema, variables: Dict) -> str:
     """
     Formats the prompt schema with provided variables.
@@ -219,6 +229,7 @@ def format_yaml_prompt(prompt_schema: PromptSchema, variables: Dict) -> str:
     return formatted_prompt
 
 
+# 组装完整提示词：系统提示词（含工具定义与 schema）+ 用户提问，按 ChatML 模板拼接
 def process_prompt(
     user_prompt,
     system_prompt_yml=Path(__file__).parent.joinpath("./system_prompt_schema.yml"),
@@ -259,17 +270,20 @@ def process_prompt(
 ###############################################################################
 
 
+# 把 NumPy 数组包装成 Triton 的 InferInput（声明名字、形状、数据类型并填充数据）
 def prepare_tensor(name, input):
     t = grpcclient.InferInput(name, input.shape, np_to_triton_dtype(input.dtype))
     t.set_data_from_numpy(input)
     return t
 
 
+# 用队列保存流式推理的异步回调结果
 class UserData:
     def __init__(self):
         self._completed_requests = queue.Queue()
 
 
+# 流式推理回调：把结果或错误放入队列，供主流程轮询取出
 def callback(user_data, result, error):
     if error:
         user_data._completed_requests.put(error)
@@ -309,6 +323,7 @@ def run_inference(
     beam_width_data = np.array([[beam_width]], dtype=np.int32)
     temperature_data = np.array([[temperature]], dtype=np.float32)
 
+    # 组装基础输入张量：文本、最大生成长度、是否流式、beam 宽度、温度
     inputs = [
         prepare_tensor("text_input", input0_data),
         prepare_tensor("max_tokens", output0_len),
@@ -390,6 +405,7 @@ def run_inference(
 
     user_data = UserData()
     # Establish stream
+    # 建立流式推理连接并异步发送请求，回调把结果写入队列
     triton_client.start_stream(callback=partial(callback, user_data))
     # Send request
     triton_client.async_stream_infer(model_name, inputs, request_id=request_id)
@@ -398,6 +414,7 @@ def run_inference(
     triton_client.stop_stream()
 
     # Parse the responses
+    # 轮询队列直到流结束：流式 + beam_width==1 时逐片拼接输出文本
     output_text = ""
     while True:
         try:

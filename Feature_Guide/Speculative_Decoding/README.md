@@ -26,34 +26,34 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Speculative Decoding
+# 投机解码（Speculative Decoding）
 
-- [About Speculative Dampling](#about-speculative-decoding)
-- [Performance Improvements](#performance-improvements)
-- [Speculative Decoding with Triton Inference Server](#speculative-decoding-with-triton-inference-server)
+- [关于投机解码](#关于投机解码)
+- [性能提升](#性能提升)
+- [Triton Inference Server 中的投机解码](#triton-inference-server-中的投机解码)
 
+## 关于投机解码
 
-## About Speculative Decoding
+投机解码（Speculative Decoding，又称 Speculative Sampling）是一组旨在让模型在一次前向传播（forward pass）迭代中生成多个 token 的技术。**在 GPU 因 batch size 较小而未充分利用的情况下**，它可以降低平均单 token 延迟。
 
-Speculative Decoding (also referred to as Speculative Sampling) is a set of techniques designed to allow generation of more than one token per forward pass iteration. This can lead to a reduction in the average per-token latency **in situations where the GPU is underutilized due to small batch sizes.**
+投机解码的核心思路是：先用一种比反复执行目标大语言模型（LLM）高效得多的方法，预测出一段未来的 token 序列（称为草稿 token，draft tokens）；随后让目标 LLM 在单次前向传播中一次性验证这些草稿 token。其背后基于两个假设：
 
-Speculative decoding involves predicting a sequence of future tokens, referred to as draft tokens, using a method that is substantially more efficient than repeatedly executing the target Large Language Model (LLM).
-These draft tokens are then collectively validated by processing them through the target LLM in a single forward pass. The underlying assumptions are twofold:
+1. 并发处理多个草稿 token 的速度与处理单个 token 相当；
+2. 在整个生成过程中，多个草稿 token 能够成功通过验证。
 
-1. processing multiple draft tokens concurrently will be as rapid as processing a single token
-2. multiple draft tokens will be validated successfully over the course of the full generation
+> 💡 **AI Infra 视角**：投机解码解决的是 LLM 推理中典型的「memory-bound」瓶颈——尤其在 decode 阶段、batch 较小时，GPU 计算资源大量空闲，瓶颈在于逐 token 串行生成。草案模型（draft model）用极小代价预测多个 token，目标模型（target model）一次前向传播批量验证，等于用「多算一点、少等一点」的思路换取更低的 TPOT（单 token 输出延迟）。这也是为什么在低并发、单请求场景下效果最明显。
 
-If the first assumption holds true, the latency of speculative decoding will no worse than the standard approach. If the second holds, output token generation advances by statistically more than one token per forward pass.
-The combination of both these allows speculative decoding to result in reduced latency.
+如果第一个假设成立，投机解码的延迟就不会比标准解码差；如果第二个假设成立，每次前向传播平均推进的 token 数就能超过 1。两个假设同时满足时，投机解码就能带来可观的延迟下降。
 
-## Performance Improvements
+## 性能提升
 
-It's important to note that the effectiveness of speculative decoding techniques is highly dependent
-on the specific task at hand. For instance, forecasting subsequent tokens in a code-completion scenario
-may prove simpler than generating a summary for an article. [Spec-Bench](https://sites.google.com/view/spec-bench)
-shows the performance of different speculative decoding approaches on different tasks.
+需要注意的是，投机解码技术的有效性高度依赖于具体任务。例如，在代码补全场景中预测后续 token，可能比为一篇文章生成摘要更简单。[Spec-Bench](https://sites.google.com/view/spec-bench) 展示了不同投机解码方法在不同任务上的表现差异。
 
-## Speculative Decoding with Triton Inference Server
- Triton Inference Server supports speculative decoding on different types of Triton backends. See what a Triton backend is [here](https://github.com/triton-inference-server/backend).
-- Follow [here](TRT-LLM/README.md) to learn how Triton Inference Server supports speculative decoding with [TensorRT-LLM Backend](https://github.com/triton-inference-server/tensorrtllm_backend).
-- Follow [here](vLLM/README.md) to learn how Triton Inference Server supports speculative decoding with [vLLM Backend](https://github.com/triton-inference-server/vllm_backend).
+> 💡 **AI Infra 视角**：评估投机解码收益的关键指标是「接受率」（acceptance rate，即草稿 token 被目标模型验证通过的比例）。接受率越高，单次前向传播推进的 token 越多，加速越明显；而接受率与任务本身的「可预测性」强相关。生产环境做加速收益评估时，务必用线上真实请求分布压测，而不是只看理想化的 benchmark——同时要留意投机解码多出的草稿计算会占用 GPU 算力，在并发高、batch 大时可能反而得不偿失。
+
+## Triton Inference Server 中的投机解码
+
+Triton Inference Server 支持在不同类型的 Triton backend 上使用投机解码。关于 Triton backend 是什么，请参见[这里](https://github.com/triton-inference-server/backend)。
+
+- 点击[这里](TRT-LLM/README.md)了解 Triton Inference Server 如何配合 [TensorRT-LLM Backend](https://github.com/triton-inference-server/tensorrtllm_backend) 支持投机解码。
+- 点击[这里](vLLM/README.md)了解 Triton Inference Server 如何配合 [vLLM Backend](https://github.com/triton-inference-server/vllm_backend) 支持投机解码。

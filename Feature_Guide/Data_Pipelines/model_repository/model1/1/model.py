@@ -30,10 +30,13 @@ import numpy as np
 import triton_python_backend_utils as pb_utils
 
 
+# Triton Python backend 模型：TritonPythonModel 类名不可更改
 class TritonPythonModel:
+    # execute 是 Python backend 的推理入口，接收一批请求并逐个处理
     def execute(self, requests):
         responses = []
         for request in requests:
+            # 按名字取出各输入张量（名字须与 config.pbtxt 的 input 定义一致）
             inp = pb_utils.get_input_tensor_by_name(request, "model_1_input_string")
             inp2 = pb_utils.get_input_tensor_by_name(
                 request, "model_1_input_UINT8_array"
@@ -46,6 +49,7 @@ class TritonPythonModel:
             )
             inp5 = pb_utils.get_input_tensor_by_name(request, "model_1_input_bool")
 
+            # 本演示模型只做透传：打印收到的张量内容
             print("Model 1 received", flush=True)
             print(inp.as_numpy(), flush=True)
             print(inp2.as_numpy(), flush=True)
@@ -53,6 +57,7 @@ class TritonPythonModel:
             print(inp4.as_numpy(), flush=True)
             print(inp5.as_numpy(), flush=True)
 
+            # 构造响应：用 pb_utils.Tensor 把原样数据包成输出张量返回
             inference_response = pb_utils.InferenceResponse(
                 output_tensors=[
                     pb_utils.Tensor(

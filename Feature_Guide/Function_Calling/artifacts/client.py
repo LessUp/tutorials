@@ -183,6 +183,7 @@ if __name__ == "__main__":
         FLAGS.embedding_bias_weights if FLAGS.embedding_bias_weights else None
     )
 
+    # 创建 gRPC 客户端（默认端口 8001），连接失败则退出
     try:
         client = grpcclient.InferenceServerClient(url=FLAGS.url)
     except Exception as e:
@@ -201,10 +202,14 @@ if __name__ == "__main__":
             [[FLAGS.return_generation_logits]], dtype=bool
         )
 
+    # 组装系统提示词：注入工具定义与函数调用 JSON schema
     prompt = client_utils.process_prompt(FLAGS.prompt)
 
+    # 实例化工具实现（get_current_stock_price / get_company_news / final_answer）
     functions = client_utils.MyFunctions()
 
+    # 函数调用主循环：LLM 每轮返回一次工具调用请求，客户端执行后把结果回填 prompt 再继续，
+    # 直到 LLM 调用 final_answer（或达到第 50 步）才结束
     while True:
         output_text = client_utils.run_inference(
             client,
@@ -230,6 +235,7 @@ if __name__ == "__main__":
             FLAGS.verbose,
         )
 
+        # 解析 LLM 返回的 JSON；格式非法则报错退出（可用约束解码从源头避免）
         try:
             response = json.loads(output_text)
         except ValueError:
@@ -240,6 +246,7 @@ if __name__ == "__main__":
         # that the full response is ready and llm does not require any
         # additional information. Additionally, if the loop has taken more
         # than 50 steps, the script ends.
+        # 终止条件：调用了 final_answer（输出最终答案）或超过 50 步上限
         if response["tool"] == "final_answer" or response["step"] == "50":
             if response["tool"] == "final_answer":
                 final_response = response["arguments"]["final_response"]
@@ -253,6 +260,7 @@ if __name__ == "__main__":
             break
 
         # Extract tool's name and arguments from the response
+        # 从响应中取出工具名和参数，动态调用对应的函数实现
         function_name = response["tool"]
         function_args = response["arguments"]
         function_to_call = getattr(functions, function_name)
@@ -267,6 +275,7 @@ if __name__ == "__main__":
 
         # Update prompt with the generated function call and results of that
         # call.
+        # 把「工具调用 + 工具返回结果」以 tool_response 形式回填 prompt，进入下一轮对话
         results_dict = f'{{"name": "{function_name}", "content": {function_response}}}'
         prompt += str(
             output_text

@@ -26,28 +26,29 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Speculative Decoding with vLLM
+# 使用 vLLM 的投机解码（Speculative Decoding with vLLM）
 
-- [About Speculative Decoding](#about-speculative-decoding)
+- [关于投机解码](#关于投机解码)
 - [EAGLE](#eagle)
-- [Draft Model-Based Speculative Decoding](#draft-model-based-speculative-decoding)
+- [基于草稿模型的投机解码](#基于草稿模型的投机解码)
 
-## About Speculative Decoding
+## 关于投机解码
 
-This tutorial shows how to build and serve speculative decoding models in Triton Inference Server with [vLLM Backend](https://github.com/triton-inference-server/vllm_backend) on a single node with one GPU. Please go to [Speculative Decoding](../README.md) main page to learn more about other supported backends.
+本教程演示如何在单节点单 GPU 上，通过 [vLLM Backend](https://github.com/triton-inference-server/vllm_backend) 在 Triton Inference Server 中构建并部署投机解码模型。其他受支持的 backend 请参见[投机解码](../README.md)主页。
 
-According to [Spec-Bench](https://sites.google.com/view/spec-bench), EAGLE is currently the top-performing approach for speeding up LLM inference across different tasks. In this tutorial, we'll focus on [EAGLE](#eagle) and demonstrate how to make it work with Triton Inference Server. We'll also cover [Draft Model-Based Speculative Decoding](#draft-model-based-speculative-decoding) for those interested in exploring alternative methods. If you are interested in how vLLM supports speculative decoding, more details [here](https://blog.vllm.ai/2024/10/17/spec-decode.html). By finishing this tutorial, you will be able to try other speculative decoding techniques provided by vLLM [here](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculative-decoding) with Triton Inference Server easily on your own.
+根据 [Spec-Bench](https://sites.google.com/view/spec-bench) 的结果，EAGLE 是目前加速 LLM 推理表现最好的方法。本教程将重点介绍 [EAGLE](#eagle)，演示如何让它在 Triton Inference Server 上工作，同时也会介绍[基于草稿模型的投机解码](#基于草稿模型的投机解码)，供想尝试其他方案的读者参考。想了解 vLLM 内部如何支持投机解码，可参见[这篇博客](https://blog.vllm.ai/2024/10/17/spec-decode.html)。完成本教程后，你就能在 Triton Inference Server 上轻松尝试 vLLM 提供的其他投机解码技术（参见[官方文档](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculative-decoding)）。
+
+> 💡 **AI Infra 视角**：EAGLE 与普通草稿模型方案的本质区别在于「草稿从哪来」。传统方案用一个小 LLM 独立生成草稿 token，而 EAGLE 复用目标模型倒数第二层输出的特征向量，用轻量的自回归头（auto-regression head）预测「下一个特征」，再经目标模型冻结的分类头（classification head）映射回 token。因为特征空间比 token 空间信息量大得多，草稿预测更准（接受率更高），同时额外参数量极小，几乎不挤占显存。
 
 ## EAGLE
 
-EAGLE ([paper](https://arxiv.org/pdf/2401.15077) | [github](https://github.com/SafeAILab/EAGLE) | [blog](https://sites.google.com/view/eagle-llm)) is a speculative decoding technique that accelerates Large Language Model (LLM) inference by predicting future tokens based on contextual features extracted from the LLM's second-top layer. It employs a lightweight Auto-regression Head to predict the next feature vector, which is then used to generate tokens through the LLM's frozen classification head, achieving significant speedups (2x-3x faster than vanilla decoding) while maintaining output quality and distribution consistency.
+EAGLE（[论文](https://arxiv.org/pdf/2401.15077) | [GitHub](https://github.com/SafeAILab/EAGLE) | [博客](https://sites.google.com/view/eagle-llm)）是一种投机解码技术：它基于 LLM 倒数第二层提取的上下文特征来预测未来 token，从而加速大语言模型（LLM）推理。EAGLE 使用一个轻量级的自回归头（Auto-regression Head）预测下一个特征向量，再通过 LLM 冻结的分类头生成 token，相比普通解码可获得 2-3 倍加速，同时保持输出质量和分布一致性。
 
-### Acquiring EAGLE Model and its Base Model
+### 获取 EAGLE 模型及其基座模型
 
-In this example, we will be using the [EAGLE-LLaMA3-Instruct-8B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B) model.
-More types of EAGLE models can be found [here](https://huggingface.co/yuhuili). The base model [Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) is also needed for EAGLE to work.
+本示例使用 [EAGLE-LLaMA3-Instruct-8B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B) 模型。更多 EAGLE 模型见[这里](https://huggingface.co/yuhuili)。EAGLE 正常工作还需要基座模型 [Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)。
 
-To download both models, run the following command:
+下载两个模型的命令如下：
 ```bash
 # Install git-lfs if needed
 apt-get update && apt-get install git-lfs -y --no-install-recommends
@@ -55,26 +56,27 @@ git lfs install
 git clone https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B
 git clone https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct
 ```
-*NOTE: you need to request access in Hugging Face and login to download and use Llama3 models.*
+*注意：Llama3 系列模型需要在 Hugging Face 上申请访问权限并登录后才能下载和使用。*
 
-### Convert EAGLE Model
+### 转换 EAGLE 模型
 
-According to vLLM official [doc](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-using-eagle-based-draft-models):
-> ... EAGLE models should be able to be loaded and used directly by vLLM after [PR 12304](https://github.com/vllm-project/vllm/pull/12304). If you are using vllm version before [PR 12304](https://github.com/vllm-project/vllm/pull/12304), please use the [script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model, and specify speculative_model="path/to/modified/eagle/model" ...
+根据 vLLM 官方[文档](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-using-eagle-based-draft-models)：
+> ... 自 [PR 12304](https://github.com/vllm-project/vllm/pull/12304) 之后，EAGLE 模型应该可以直接被 vLLM 加载使用。如果你使用的 vllm 版本早于 [PR 12304](https://github.com/vllm-project/vllm/pull/12304)，请使用这个[脚本](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d)转换投机模型，并指定 speculative_model="path/to/modified/eagle/model" ...
 
-For Triton, if you are using Triton Server container version <= 25.02, you need to convert the EAGLE model by running above [script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d), inside the folder than contains both EAGLE and base models. Triton Server container version >= 25.03 would use vLLM versions (>= 0.7.3) that contains PR 12304.
+对 Triton 而言，如果你使用的 Triton Server 容器版本 <= 25.02，需要在同时包含 EAGLE 模型和基座模型的目录下运行上述[脚本](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d)来转换 EAGLE 模型。Triton Server 容器版本 >= 25.03 使用的 vLLM 版本（>= 0.7.3）已包含 PR 12304。
 
-### Create Model Repository
+### 创建模型仓库（Model Repository）
 
-A model repository is Triton’s way of reading your models and any associated metadata with each model (configurations, version files, etc.). See [here](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/tutorials/Conceptual_Guide/Part_1-model_deployment/README.html#setting-up-the-model-repository) for model details.
+模型仓库是 Triton 读取模型及其元数据（配置、版本文件等）的方式。关于模型仓库的细节，参见[这里](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/tutorials/Conceptual_Guide/Part_1-model_deployment/README.html#setting-up-the-model-repository)。
 
-We have prepared a template of a model repository for EAGLE model and base model in [model_repository](model_repository). Please make a copy and modify the model.json to suit your needs. For example, we are setting `num_speculative_tokens` to 5 for eagle_model, according to the vLLM [example](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-with-a-draft-model). You can change it to other values and it might affect the performance.
+我们在 [model_repository](model_repository) 中准备了 EAGLE 模型和基座模型的模板，请复制后按需修改其中的 model.json。例如，参照 vLLM [示例](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-with-a-draft-model)，我们将 eagle_model 的 `num_speculative_tokens` 设为 5。你也可以改成其他值，这会影响性能。
 
-### Serving with Triton
+> 💡 **AI Infra 视角**：`num_speculative_tokens`（草稿长度）是投机解码最核心的调参旋钮之一。草稿越长，单次前向传播理论上能推进的 token 越多，但接受率会随草稿长度递减，且每轮验证都要重新计算 KV cache——草稿过长时，多出的验证开销反而会拖慢生成。实践中通常从 3-5 起步，用 Gen-AI Perf 对比不同取值下的 TPOT 和吞吐再定。
 
-Let's serve the model by launching Triton docker container with vLLM backend.
-Note that we're mounting the downloaded (and maybe converted) EAGLE and base models to `/hf-models` and the model repository acquired in the previous section to `/model_repository` in the docker container. Please, make sure to replace <xx.yy> with the version of Triton that you want
-to use. The latest Triton Server container is recommended and could be found [here](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tritonserver/tags).
+### 用 Triton 部署
+
+下面启动带 vLLM backend 的 Triton docker 容器来部署模型。
+注意我们把下载（以及可能转换过）的 EAGLE 和基座模型挂载到容器内的 `/hf-models`，把上一节准备的模型仓库挂载到 `/model_repository`。请将 <xx.yy> 替换为你想要使用的 Triton 版本。推荐使用最新的 Triton Server 容器，可在[这里](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tritonserver/tags)找到。
 
 ```bash
 docker run --gpus all -it --net=host --rm -p 8001:8001 --shm-size=1G \
@@ -86,15 +88,15 @@ docker run --gpus all -it --net=host --rm -p 8001:8001 --shm-size=1G \
     --model-control-mode explicit --load-model eagle_model
 ```
 
-### Send Inference Requests
+### 发送推理请求
 
-Let's send an inference request to the [generate endpoint](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/protocol/extension_generate.html).
+向 [generate 端点](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/protocol/extension_generate.html)发送一个推理请求。
 
 ```bash
 curl -X POST localhost:8000/v2/models/eagle_model/generate -d '{"text_input": "What is Triton Inference Server?", "parameters": {"stream": false, "temperature": 0}}' | jq
 ```
 
-> You should expect the following response:
+> 你应该会收到类似下面的响应：
 > ```
 > {
 >  "model_name": "eagle_model",
@@ -103,15 +105,13 @@ curl -X POST localhost:8000/v2/models/eagle_model/generate -d '{"text_input": "W
 > }
 > ```
 
-### Evaluating Performance with Gen-AI Perf
+### 用 Gen-AI Perf 评估性能
 
-Gen-AI Perf is a command line tool for measuring the throughput and latency of generative AI models as served through an inference server.
-You can read more about Gen-AI Perf [here](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/genai-perf/README.html). We will use Gen-AI Perf to evaluate the performance gain of EAGLE model over the base model.
+Gen-AI Perf 是一个命令行工具，用于测量推理服务器上生成式 AI 模型的吞吐和延迟。更多信息见[这里](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/genai-perf/README.html)。我们将用 Gen-AI Perf 评估 EAGLE 模型相对基座模型的性能提升。
 
-1. Prepare Dataset
+1. 准备数据集
 
-We will be using the HumanEval dataset for our evaluation, which is used in the original EAGLE paper. The HumanEval dataset has been converted to the format required by EAGLE and is available [here](https://github.com/SafeAILab/EAGLE/blob/main/eagle/data/humaneval/question.jsonl). To make it compatible for Gen-AI Perf, we need to do another conversion. You may use other datasets besides HumanEval as well, as long as it could be converted to the
-format required by Gen-AI Perf. Note that MT-bench could not be used since Gen-AI Perf does not support multiturn dataset as input yet. Follow the steps below to download and convert the dataset.
+我们使用 EAGLE 原论文所用的 HumanEval 数据集进行评估。该数据集已转换为 EAGLE 需要的格式，可在[这里](https://github.com/SafeAILab/EAGLE/blob/main/eagle/data/humaneval/question.jsonl)获取。为了兼容 Gen-AI Perf，还需要再做一次转换。你也可以使用 HumanEval 之外的其他数据集，只要它能转换成 Gen-AI Perf 要求的格式即可。注意 MT-bench 目前不能使用，因为 Gen-AI Perf 还不支持多轮（multiturn）数据集作为输入。按以下步骤下载并转换数据集。
 ```bash
 wget https://raw.githubusercontent.com/SafeAILab/EAGLE/main/eagle/data/humaneval/question.jsonl
 
@@ -119,16 +119,16 @@ wget https://raw.githubusercontent.com/SafeAILab/EAGLE/main/eagle/data/humaneval
 python3 dataset-converter.py --input_file question.jsonl --output_file converted_humaneval.jsonl
 ```
 
-2. Install GenAI-Perf (Ubuntu 24.04, Python 3.10+)
+2. 安装 GenAI-Perf（Ubuntu 24.04，Python 3.10+）
 
 ```bash
 pip install genai-perf
 ```
-*NOTE: you must already have CUDA 12 installed.*
+*注意：必须已经安装 CUDA 12。*
 
-3. Run Gen-AI Perf
+3. 运行 Gen-AI Perf
 
-Run the following command in the SDK container:
+在 SDK 容器中执行以下命令：
 ```bash
 genai-perf \
   profile \
@@ -141,9 +141,9 @@ genai-perf \
   --url localhost:8001 \
   --concurrency 1
 ```
-*NOTE: When benchmarking the speedup of speculative decoding versus the base model, use `--concurrency 1`. This setting is crucial because speculative decoding is designed to trade extra computation for reduced token generation latency. By limiting concurrency, we avoid saturating hardware resources with multiple requests, allowing for a more accurate assessment of the technique's latency benefits. This approach ensures that the benchmark reflects the true performance gains of speculative decoding in real-world, low-concurrency scenarios.*
+*注意：在对比投机解码与基座模型的加速效果时，请使用 `--concurrency 1`。这个设置很关键，因为投机解码的本质是用额外的计算换取更低的 token 生成延迟。限制并发可以避免多个请求占满硬件资源，从而更准确地评估该技术在延迟上的收益。这样才能确保 benchmark 反映投机解码在真实低并发场景下的性能增益。*
 
-A sample output that looks like this:
+示例输出如下：
 ```
                                     NVIDIA GenAI-Perf | LLM Metrics
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┓
@@ -158,11 +158,11 @@ A sample output that looks like this:
 └───────────────────────────────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
 ```
 
-*NOTE: above sample output is done on a single node with one GPU - RTX 5880 (48GB GPU memory). The number below is only for reference. The actual number may vary due to the different hardware and environment.*
+*注意：上述示例输出来自单节点单 GPU（RTX 5880，48GB 显存）。以下数字仅供参考，实际数值会因硬件和环境不同而有所差异。*
 
-4. Run Gen-AI Perf on Base Model
+4. 在基座模型上运行 Gen-AI Perf
 
-To compare performance between EAGLE and base model (i.e. vanilla LLM w/o speculative decoding), we need to run Gen-AI Perf Tool on the base model as well. To serve base model, we only need to change the [Serving with Triton](#Serving-with-Triton) by switching the `--load-model` argument from `eagle_model` to `base_model`:
+为了对比 EAGLE 与基座模型（即未启用投机解码的普通 LLM）的性能，我们还需要在基座模型上运行 Gen-AI Perf。部署基座模型只需修改[用 Triton 部署](#用-triton-部署)一节，把 `--load-model` 参数从 `eagle_model` 换成 `base_model`：
 
 ```bash
 docker run --gpus all -it --net=host --rm -p 8001:8001 --shm-size=1G \
@@ -174,25 +174,25 @@ docker run --gpus all -it --net=host --rm -p 8001:8001 --shm-size=1G \
     --model-control-mode explicit --load-model base_model
 ```
 
-Please use EAGLE with care, since according to vLLM [doc](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-using-eagle-based-draft-models):
+请谨慎使用 EAGLE，因为根据 vLLM [文档](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-using-eagle-based-draft-models)：
 
-> When using EAGLE-based speculators with vLLM, the observed speedup is lower than what is reported in the reference implementation [here](https://github.com/SafeAILab/EAGLE). This issue is under investigation and tracked here: [vllm-project/vllm#9565](https://github.com/vllm-project/vllm/issues/9565).
+> 在 vLLM 中使用 EAGLE 类投机器时，实测加速比参考实现[这里](https://github.com/SafeAILab/EAGLE)报告的要低。该问题正在调查中，跟踪进展见 [vllm-project/vllm#9565](https://github.com/vllm-project/vllm/issues/9565)。
 
-## Draft Model-Based Speculative Decoding
+## 基于草稿模型的投机解码
 
-Draft Model-Based Speculative Decoding ([paper](https://arxiv.org/pdf/2302.01318)) is another (and earlier) approach to accelerate LLM inference, distinct from EAGLE. Here are the key differences:
+基于草稿模型的投机解码（[论文](https://arxiv.org/pdf/2302.01318)）是另一种（更早的）加速 LLM 推理的方法，与 EAGLE 不同。主要区别如下：
 
- - Draft Generation: it uses a smaller, faster LLM as a draft model to predict multiple tokens ahead. This contrasts with EAGLE's feature-level extrapolation.
+ - 草稿生成：使用一个更小、更快的 LLM 作为草稿模型，一次性预测多个后续 token。这与 EAGLE 在特征层面的外推方式截然不同。
 
- - Verification Process: it employs a chain-like structure for draft generation and verification, unlike EAGLE which uses tree-based attention mechanisms.
+ - 验证过程：草稿生成和验证采用链式结构，而 EAGLE 使用基于树的注意力机制。
 
- - Efficiency: While effective, it is generally slower than EAGLE.
+ - 效率：虽然有效，但通常比 EAGLE 慢。
 
- - Implementation: it requires a separate draft model, which can be challenging to implement effectively for smaller target models. EAGLE, in contrast, modifies the existing model architecture.
+ - 实现：需要一个独立的草稿模型，对于较小的目标模型来说，找到合适的草稿模型可能比较困难。而 EAGLE 直接改造现有模型架构。
 
- - Accuracy: its draft accuracy can vary depending on the draft model used, while EAGLE achieves a higher draft accuracy (about 0.8).
+ - 准确性：草稿准确性取决于所用的草稿模型，而 EAGLE 的草稿准确率更高（约 0.8）。
 
-To run Draft Model-Based Speculative Decoding with Triton Inference Server, it is very similar to the steps above for EAGLE. The only difference is that you need to use a different model repository. A template of model repository for Draft Model-Based Speculative Decoding is available in [model_repository/opt_model](model_repository/opt_model), following the example from vLLM [doc](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-with-a-draft-model). Please make a copy and modify the model.json to suit your needs. Then, you can start Triton server with the following command:
+要在 Triton Inference Server 上运行基于草稿模型的投机解码，步骤与上面 EAGLE 的非常相似，唯一区别是需要使用不同的模型仓库。基于草稿模型的投机解码模板位于 [model_repository/opt_model](model_repository/opt_model)，参照 vLLM [文档](https://docs.vllm.ai/en/latest/features/spec_decode.html#speculating-with-a-draft-model)中的示例。复制后按需修改 model.json，然后用以下命令启动 Triton Server：
 
 ```bash
 docker run --gpus all -it --net=host --rm -p 8001:8001 --shm-size=1G \

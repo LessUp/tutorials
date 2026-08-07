@@ -28,6 +28,7 @@ import argparse
 import json
 
 
+# 解析命令行参数：指定输入/输出的 JSONL 文件路径
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert dataset format")
     parser.add_argument(
@@ -39,12 +40,14 @@ def parse_args():
     return parser.parse_args()
 
 
+# 把 EAGLE 格式的数据集（含 "turns" 字段）转换为 Gen-AI Perf 兼容的 {"text": ...} 格式
 def convert_dataset(input_file, output_file):
     with open(input_file, "r", encoding="utf-8") as infile, open(
         output_file, "w", encoding="utf-8"
     ) as outfile:
         for line in infile:
             data = json.loads(line)  # Load each JSONL line as a dict
+            # 只保留 "turns" 列表中的每一轮文本，逐条写出
             if "turns" in data and isinstance(data["turns"], list):
                 for turn in data["turns"]:  # Iterate over "turns" list
                     json.dump({"text": turn}, outfile)
@@ -53,6 +56,7 @@ def convert_dataset(input_file, output_file):
     print(f"Converted dataset {input_file} and saved to {output_file}")
 
 
+# 程序入口：解析参数后执行数据集转换
 if __name__ == "__main__":
     args = parse_args()
     convert_dataset(args.input_file, args.output_file)

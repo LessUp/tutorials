@@ -26,80 +26,44 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 -->
 
-# Constrained Decoding with Triton Inference Server
+# Triton Inference Server 中的约束解码（Constrained Decoding）
 
-This tutorial focuses on constrained decoding, an important technique for
-ensuring that large language models (LLMs) generate outputs that adhere
-to strict formatting requirements—requirements that may be challenging or
-expensive to achieve solely through fine-tuning.
+本教程聚焦约束解码（constrained decoding）——一项确保大语言模型（LLM）输出严格遵守格式要求的重要技术。这些格式要求仅靠微调来满足，可能既困难又昂贵。
 
-## Table of Contents
+> 💡 **AI Infra 视角**：约束解码在推理服务中的核心价值是「把结构化输出的可靠性从「模型发挥」变成「系统保证」。在 Agent、RAG 等生产场景里，下游解析器（如 JSON parser）对输出格式是硬依赖，一次格式错误就可能导致整个调用链失败或触发重试。在服务端做约束解码，可以在采样阶段直接从源头排除非法 token，比「生成后校验重试」省一次完整生成，同时显著降低 TTFT/TPOT 的无效波动。
 
-- [Introduction to Constrained Decoding](#introduction-to-constrained-decoding)
-- [Prerequisite: Hermes-2-Pro-Llama-3-8B](#prerequisite-hermes-2-pro-llama-3-8b)
-- [Structured Generation via Prompt Engineering](#structured-generation-via-prompt-engineering)
-    * [Example 1](#example-1)
-    * [Example 2](#example-2)
-- [Enforcing Output Format via External Libraries](#enforcing-output-format-via-external-libraries)
-    * [Pre-requisite: Common set-up](#pre-requisite-common-set-up)
-        + [Logits Post-Processor](#logits-post-processor)
-        + [Tokenizer](#tokenizer)
-        + [Repository set up](#repository-set-up)
+## 目录
+
+- [约束解码简介](#约束解码简介)
+- [前置条件：Hermes-2-Pro-Llama-3-8B](#前置条件hermes-2-pro-llama-3-8b)
+- [通过提示工程实现结构化生成](#通过提示工程实现结构化生成)
+    * [示例 1](#示例-1)
+    * [示例 2](#示例-2)
+- [通过外部库强制输出格式](#通过外部库强制输出格式)
+    * [前置条件：通用配置](#前置条件通用配置)
+        + [Logits 后处理器](#logits-后处理器)
+        + [分词器（Tokenizer）](#分词器tokenizer)
+        + [仓库配置](#仓库配置)
     * [LM Format Enforcer](#lm-format-enforcer)
     * [Outlines](#outlines)
 
-## Introduction to Constrained Decoding
+## 约束解码简介
 
-Constrained decoding is a powerful technique used in natural language processing
-and various AI applications to guide and control the output of a model.
-By imposing specific constraints, this method ensures that generated outputs
-adhere to predefined criteria, such as length, format, or content restrictions.
-This capability is essential in contexts where compliance with rules
-is non-negotiable, such as producing valid code snippets, structured data,
-or grammatically correct sentences.
+约束解码是自然语言处理和各种 AI 应用中用于引导和控制模型输出的一项强大技术。通过施加特定约束，该方法能确保生成输出符合预设标准，例如长度、格式或内容限制。在规则必须遵守的场景中（如生成合法代码片段、结构化数据或语法正确的句子），这一能力不可或缺。
 
-In recent advancements, some models are already fine-tuned to incorporate
-these constraints inherently. These models are designed
-to seamlessly integrate constraints during the generation process, reducing
-the need for extensive post-processing. By doing so, they enhance the efficiency
-and accuracy of tasks that require strict adherence to predefined rules.
-This built-in capability makes them particularly valuable in applications
-like automated content creation, data validation, and real-time language
-translation, where precision and reliability are paramount.
+在最近的发展中，一些模型已经通过微调将这些约束内化到模型中。这些模型在生成过程中能无缝整合约束，从而减少对大量后处理的需求，提升需要严格遵循预设规则的任务的效率和准确性。这种内置能力使它们在自动化内容创作、数据校验和实时语言翻译等对精度和可靠性要求极高的应用中特别有价值。
 
-This tutorial is based on [Hermes-2-Pro-Llama-3-8B](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B),
-, which already supports JSON Structured Outputs. An extensive instruction stack
-on deploying Hermes-2-Pro-Llama-3-8B model with Triton Inference Server and
-TensorRT-LLM backend can be found in [this](../../Popular_Models_Guide/Hermes-2-Pro-Llama-3-8B/README.md)
-tutorial. The structure and quality of a produced output in such cases can be
-controlled through prompt engineering. To explore this path, please refer to
-[Structured Generation via Prompt Engineering](#structured-generation-via-prompt-engineering)
-section on the tutorial.
+本教程基于 [Hermes-2-Pro-Llama-3-8B](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B) 模型，它已经支持 JSON 结构化输出（JSON Structured Outputs）。关于如何用 Triton Inference Server 和 TensorRT-LLM backend 部署 Hermes-2-Pro-Llama-3-8B 的详细教程，参见[这个](../../Popular_Models_Guide/Hermes-2-Pro-Llama-3-8B/README.md)教程。这类场景下，输出的结构和质量可以通过提示工程（prompt engineering）来控制。想了解这条路径，请参考本教程的[通过提示工程实现结构化生成](#通过提示工程实现结构化生成)一节。
 
-For scenarios where models are not inherently fine-tuned for
-constrained decoding, or when more precise control over the output is desired,
-dedicated libraries like
-[*LM Format Enforcer*](https://github.com/noamgat/lm-format-enforcer?tab=readme-ov-file)
-and [*Outlines*](https://github.com/outlines-dev/outlines?tab=readme-ov-file)
-offer robust solutions. These libraries provide tools to enforce specific
-constraints on model outputs, allowing developers to tailor the generation
-process to meet precise requirements. By leveraging such libraries,
-users can achieve greater control over the output, ensuring it aligns perfectly
-with the desired criteria, whether that involves maintaining a certain format,
-adhering to content guidelines, or ensuring grammatical correctness.
-In this tutorial we'll show how to use *LM Format Enforcer* and *Outlines*
-in your workflow.
+对于没有针对约束解码做过微调的模型，或者需要对输出进行更精确控制的场景，*LM Format Enforcer*（[GitHub](https://github.com/noamgat/lm-format-enforcer?tab=readme-ov-file)）和 *Outlines*（[GitHub](https://github.com/outlines-dev/outlines?tab=readme-ov-file)）等专用库提供了可靠的解决方案。这些库提供了对模型输出施加特定约束的工具，让开发者能够定制生成过程以满足精确需求。借助这些库，用户可以对输出获得更强的控制力，确保输出与期望标准完全一致——无论是保持特定格式、遵守内容规范，还是保证语法正确。本教程将演示如何在自己的工作流中使用 *LM Format Enforcer* 和 *Outlines*。
 
-## Prerequisite: Hermes-2-Pro-Llama-3-8B
+## 前置条件：Hermes-2-Pro-Llama-3-8B
 
-Before proceeding, please make sure that you've successfully deployed
-[Hermes-2-Pro-Llama-3-8B.](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B)
-model with Triton Inference Server and TensorRT-LLM backend
-following [these steps.](../../Popular_Models_Guide/Hermes-2-Pro-Llama-3-8B/README.md)
+在继续之前，请确保你已经按照[这些步骤](../../Popular_Models_Guide/Hermes-2-Pro-Llama-3-8B/README.md)用 Triton Inference Server 和 TensorRT-LLM backend 成功部署了 [Hermes-2-Pro-Llama-3-8B](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B) 模型。
 
-## Structured Generation via Prompt Engineering
+## 通过提示工程实现结构化生成
 
-First, let's start Triton SDK container:
+首先，启动 Triton SDK 容器：
 ```bash
 # Using the SDK container as an example
 docker run --rm -it --net host --shm-size=2g \
@@ -109,28 +73,25 @@ docker run --rm -it --net host --shm-size=2g \
     nvcr.io/nvidia/tritonserver:<xx.yy>-py3-sdk
 ```
 
-The provided client script uses `pydantic` library, which we do not ship with
-the sdk container. Make sure to install it, before proceeding:
+提供的客户端脚本用到了 `pydantic` 库，SDK 容器中没有自带。继续之前请先安装：
 
 ```bash
 pip install pydantic
 ```
 
-### Example 1
+### 示例 1
 
-For fine-tuned model we can enable JSON mode by simply composing a system prompt
-as:
+对于微调过的模型，只需构造如下的系统提示（system prompt）即可开启 JSON 模式：
 
 ```
 You are a helpful assistant that answers in JSON.
 ```
-Please, refer to [`client.py`](./artifacts/client.py) for full `prompt`
-composition logic.
+完整的 `prompt` 组装逻辑请参考 [`client.py`](./artifacts/client.py)。
 
 ```bash
 python3 /tutorials/AI_Agents_Guide/Constrained_Decoding/artifacts/client.py --prompt "Give me information about Harry Potter and the Order of Phoenix" -o 200 --use-system-prompt
 ```
-You should expect the following response:
+你应该会收到类似下面的响应：
 
 ```
 ...
@@ -159,11 +120,9 @@ assistant
 
 ```
 
-### Example 2
+### 示例 2
 
-Optionally, we can also restrict an output to a specific schema. For example,
-in [`client.py`](./artifacts/client.py) we use a `pydantic` library to define the
-following answer format:
+（可选）我们还可以把输出限制为特定的 schema。例如，在 [`client.py`](./artifacts/client.py) 中我们用 `pydantic` 库定义了如下回答格式：
 
 ```python
 from pydantic import BaseModel
@@ -181,12 +140,12 @@ prompt += "Here's the json schema you must adhere to:\n<schema>\n{schema}\n</sch
                 schema=AnswerFormat.model_json_schema())
 
 ```
-Let's try it out:
+来试试：
 
 ```bash
 python3 /tutorials/AI_Agents_Guide/Constrained_Decoding/artifacts/client.py --prompt "Give me information about Harry Potter and the Order of Phoenix" -o 200 --use-system-prompt --use-schema
 ```
-You should expect the following response:
+你应该会收到类似下面的响应：
 
 ```
  ...
@@ -201,17 +160,11 @@ assistant
 
 ```
 
-## Enforcing Output Format via External Libraries
+## 通过外部库强制输出格式
 
-In this section of the tutorial, we'll show how to impose constrains on LLMs,
-which are not inherently fine-tuned for constrained decoding. We'll
-[*LM Format Enforcer*](https://github.com/noamgat/lm-format-enforcer?tab=readme-ov-file)
-and [*Outlines*](https://github.com/outlines-dev/outlines?tab=readme-ov-file)
-offer robust solutions.
+本小节将演示如何对没有针对约束解码做过微调的 LLM 施加约束。*LM Format Enforcer*（[GitHub](https://github.com/noamgat/lm-format-enforcer?tab=readme-ov-file)）和 *Outlines*（[GitHub](https://github.com/outlines-dev/outlines?tab=readme-ov-file)）提供了可靠的解决方案。
 
-The reference implementation for both libraries is provided in
-[`utils.py`](./artifacts/utils.py) script, which also defines the output
-format `AnswerFormat`:
+两个库的参考实现都放在 [`utils.py`](./artifacts/utils.py) 脚本中，该脚本还定义了输出格式 `AnswerFormat`：
 
 ```python
 class WandFormat(BaseModel):
@@ -228,44 +181,28 @@ class AnswerFormat(BaseModel):
         wand: WandFormat
 ```
 
-### Pre-requisite: Common set-up
+> 💡 **AI Infra 视角**：提示工程与外部库的取舍本质上是在「零改造成本」和「强格式保证」之间权衡。提示工程只是「引导」——模型仍有可能输出非法格式，需要客户端再做校验兜底；而 LM Format Enforcer / Outlines 这类库则把 JSON schema 编译成有限状态机（FSM）或正则表达式，在每个采样步用掩码（mask）把不合法 token 的 logits 置为负无穷，从机制上杜绝非法输出。代价是每步多一次掩码计算和 tokenizer 前缀匹配的开销（通常可忽略），但对低延迟要求极高的场景仍需压测确认。
 
-Make sure you've successfully deployed Hermes-2-Pro-Llama-3-8B model
-with Triton Inference Server and TensorRT-LLM backend following
-[these steps](../../Popular_Models_Guide/Hermes-2-Pro-Llama-3-8B/README.md).
+### 前置条件：通用配置
+
+确保你已经按照[这些步骤](../../Popular_Models_Guide/Hermes-2-Pro-Llama-3-8B/README.md)用 Triton Inference Server 和 TensorRT-LLM backend 成功部署了 Hermes-2-Pro-Llama-3-8B 模型。
 > [!IMPORTANT]
-> Make sure that the `tutorials` folder is mounted to `/tutorials`, when you
-> start the docker container.
+> 启动 docker 容器时，确保 `tutorials` 文件夹挂载到了 `/tutorials`。
 
+配置成功后，你应当有 `/opt/tritonserver/inflight_batcher_llm` 文件夹，并能成功发起几个推理请求（例如[示例 1](#示例-1)或[示例 2](#示例-2)中的请求）。
 
-Upon successful setup you should have `/opt/tritonserver/inflight_batcher_llm`
-folder and try a couple of inference requests (e.g. those, provided in
-[example 1](#example-1) or [example 2](#example-2)).
-
-We'll do some adjusments to model files, thu if you have a running server, you
-can stop it via:
+我们接下来会对模型文件做一些调整，如果你的服务器正在运行，可以通过以下命令停掉它：
 ```bash
 pkill tritonserver
 ```
 
-#### Logits Post-Processor
+#### Logits 后处理器
 
-Both of the libraries limit the set of allowed tokens at every generation stage.
-In TensorRT-LLM, user can define a custom
-[logits post-processor](https://nvidia.github.io/TensorRT-LLM/latest/features/sampling.html#logits-processor)
-to mask logits, which should never be used in the current generation step.
+这两个库都会在每一步生成时限制可选 token 的集合。在 TensorRT-LLM 中，用户可以自定义一个 [logits 后处理器（logits post-processor）](https://nvidia.github.io/TensorRT-LLM/latest/features/sampling.html#logits-processor)来掩蔽当前生成步骤中不应使用的 logits。
 
-For TensorRT-LLM models, deployed via `python` backend (i.e. when
-[`triton_backend`](https://github.com/NVIDIA/TensorRT-LLM/blob/97ab014bdbd2b20c567f1b63fb86c18b55aac661/triton_backend/all_models/inflight_batcher_llm/tensorrt_llm/config.pbtxt#L28C10-L28C29)
-is set to `python` in `tensorrt_llm/config.pbtxt`, Triton's python backend will
-use
-[`model.py`](https://github.com/NVIDIA/TensorRT-LLM/tree/main/triton_backend/all_models/inflight_batcher_llm/tensorrt_llm/1/model.py)
-to serve your TensorRT-LLM model.), custom logits processor should be specified
-during model's initialization as a part of
-[Executor's](https://nvidia.github.io/TensorRT-LLM/advanced/executor.html#executor-api)
-configuration
-([`logits_post_processor_map`](https://github.com/NVIDIA/TensorRT-LLM/blob/32ed92e4491baf2d54682a21d247e1948cca996e/tensorrt_llm/hlapi/llm_utils.py#L205)).
-Below is the sample for reference.
+> 💡 **AI Infra 视角**：logits 后处理器是 TensorRT-LLM 把「采样策略」与「业务约束」解耦的关键挂载点：服务端在 Executor 配置里注册自定义处理器，客户端只需在请求里带上处理器名字（`logits_post_processor_name`），同一个模型就能按请求动态切换不同的约束策略（比如一个是 JSON schema，一个是正则），无需重新部署模型。这在多租户或多业务共用一个模型的场景里很实用。
+
+对于通过 `python` backend 部署的 TensorRT-LLM 模型（即在 `tensorrt_llm/config.pbtxt` 中把 [`triton_backend`](https://github.com/NVIDIA/TensorRT-LLM/blob/97ab014bdbd2b20c567f1b63fb86c18b55aac661/triton_backend/all_models/inflight_batcher_llm/tensorrt_llm/config.pbtxt#L28C10-L28C29) 设为 `python` 时，Triton 的 python backend 会用 [`model.py`](https://github.com/NVIDIA/TensorRT-LLM/tree/main/triton_backend/all_models/inflight_batcher_llm/tensorrt_llm/1/model.py) 来托管你的 TensorRT-LLM 模型），自定义 logits 处理器需要在模型初始化时作为 [Executor](https://nvidia.github.io/TensorRT-LLM/advanced/executor.html#executor-api) 配置的一部分（[`logits_post_processor_map`](https://github.com/NVIDIA/TensorRT-LLM/blob/32ed92e4491baf2d54682a21d247e1948cca996e/tensorrt_llm/hlapi/llm_utils.py#L205)）来指定。下面是参考示例。
 
 ```diff
 ...
@@ -279,10 +216,7 @@ self.executor = trtllm.Executor(model_path=...,
 ...
 ```
 
-Additionally, if you want to enable logits post-processor for every request
-individually, you can do so via an additional `input` parameter.
-For example, in this tutorial we will add `logits_post_processor_name` in
-`inflight_batcher_llm/tensorrt_llm/config.pbtxt`:
+另外，如果你想为每个请求单独启用 logits 后处理器，可以通过一个额外的 `input` 参数实现。例如，本教程在 `inflight_batcher_llm/tensorrt_llm/config.pbtxt` 中添加 `logits_post_processor_name`：
 ```diff
 input [
   {
@@ -309,8 +243,7 @@ input [
 ]
 ...
 ```
-and process it in `execute` function in
-`inflight_batcher_llm/tensorrt_llm/1/model.py`:
+并在 `inflight_batcher_llm/tensorrt_llm/1/model.py` 的 `execute` 函数中处理它：
 
 ```diff
 def execute(self, requests):
@@ -345,14 +278,7 @@ def execute(self, requests):
             except Exception as e:
             ...
 ```
-In this tutorial, we're deploying Hermes-2-Pro-Llama-3-8B model as a part of an
-ensemble. This means that the request is processed by the `ensemble` model
-first, and then it is sent to `pre-processing model`, `tensorrt-llm model`, and
-finally `post-processing`. This sequence defined in
-`inflight_batcher_llm/ensemble/config.pbtxt` as well as input and output
-mappings. Thus, we would need to update
-`inflight_batcher_llm/ensemble/config.pbtxt` as well, so that `ensemble` model
-properly passes additional input parameter to `tensorrt-llm model`:
+本教程中，Hermes-2-Pro-Llama-3-8B 模型是以 ensemble 的形式部署的。这意味着请求先由 `ensemble` 模型处理，然后依次发送给 `pre-processing` 模型、`tensorrt-llm` 模型，最后是 `post-processing` 模型。这个流程以及输入输出映射定义在 `inflight_batcher_llm/ensemble/config.pbtxt` 中。因此我们还需要同步更新 `inflight_batcher_llm/ensemble/config.pbtxt`，让 `ensemble` 模型把额外的输入参数正确传递给 `tensorrt-llm` 模型：
 
 ```diff
 input [
@@ -411,16 +337,11 @@ ensemble_scheduling {
     ...
 ```
 
-If you follow along with this tutorial, make sure same changes are incorporated
-into corresponding files of `/opt/tritonserver/inflight_batcher_llm` repository.
+如果你跟随本教程操作，请确保 `/opt/tritonserver/inflight_batcher_llm` 仓库中对应的文件做了相同的修改。
 
-#### Tokenizer
+#### 分词器（Tokenizer）
 
-Both [*LM Format Enforcer*](https://github.com/noamgat/lm-format-enforcer?tab=readme-ov-file)
-and [*Outlines*](https://github.com/outlines-dev/outlines?tab=readme-ov-file)
-require tokenizer access at initialization time. In this tutorial,
-we'll be exposing tokenizer via `inflight_batcher_llm/tensorrt_llm/config.pbtxt`
-parameter:
+[*LM Format Enforcer*](https://github.com/noamgat/lm-format-enforcer?tab=readme-ov-file) 和 [*Outlines*](https://github.com/outlines-dev/outlines?tab=readme-ov-file) 在初始化时都需要访问 tokenizer。本教程通过 `inflight_batcher_llm/tensorrt_llm/config.pbtxt` 参数暴露 tokenizer：
 
 ```txt
 parameters: {
@@ -430,19 +351,17 @@ parameters: {
   }
 }
 ```
-Simply append to the end on the `inflight_batcher_llm/tensorrt_llm/config.pbtxt`.
+把它直接追加到 `inflight_batcher_llm/tensorrt_llm/config.pbtxt` 的末尾即可。
 
-#### Repository set up
+#### 仓库配置
 
-We've provided a sample implementation for *LM Format Enforcer* and *Outlines*
-in [`artifacts/utils.py`](./artifacts/utils.py). Make sure you've copied it into
-`/opt/tritonserver/inflight_batcher_llm/tensorrt_llm/1/lib` via
+我们在 [`artifacts/utils.py`](./artifacts/utils.py) 中提供了 *LM Format Enforcer* 和 *Outlines* 的示例实现。请把它复制到 `/opt/tritonserver/inflight_batcher_llm/tensorrt_llm/1/lib`：
 
 ```bash
 mkdir -p inflight_batcher_llm/tensorrt_llm/1/lib
 cp /tutorials/AI_Agents_Guide/Constrained_Decoding/artifacts/utils.py inflight_batcher_llm/tensorrt_llm/1/lib/
 ```
-Finally, let's install all required libraries:
+最后，安装所有必需的库：
 
 ```bash
 pip install pydantic lm-format-enforcer outlines setuptools
@@ -450,8 +369,7 @@ pip install pydantic lm-format-enforcer outlines setuptools
 
 ### LM Format Enforcer
 
-To use LM Format Enforcer, make sure
-`inflight_batcher_llm/tensorrt_llm/1/model.py` contains the following changes:
+要使用 LM Format Enforcer，请确保 `inflight_batcher_llm/tensorrt_llm/1/model.py` 包含以下修改：
 
 ```diff
 ...
@@ -499,9 +417,9 @@ class TritonPythonModel:
 ...
 ```
 
-#### Send an inference request
+#### 发送推理请求
 
-First, let's start Triton SDK container:
+首先，启动 Triton SDK 容器：
 ```bash
 # Using the SDK container as an example
 docker run --rm -it --net host --shm-size=2g \
@@ -511,33 +429,32 @@ docker run --rm -it --net host --shm-size=2g \
     nvcr.io/nvidia/tritonserver:<xx.yy>-py3-sdk
 ```
 
-The provided client script uses `pydantic` library, which we do not ship with
-the sdk container. Make sure to install it, before proceeding:
+提供的客户端脚本用到了 `pydantic` 库，SDK 容器中没有自带。继续之前请先安装：
 
 ```bash
 pip install pydantic
 ```
 
-##### Option 1. Use provided [client script](./artifacts/client.py)
+##### 方式 1：使用提供的[客户端脚本](./artifacts/client.py)
 
-Let's first send a standard request, without enforcing the JSON answer format:
+先发送一个不强制 JSON 回答格式的普通请求：
 ```bash
 python3 /tutorials/AI_Agents_Guide/Constrained_Decoding/artifacts/client.py --prompt "Who is Harry Potter?" -o 100
 ```
 
-You should expect the following response:
+你应该会收到类似下面的响应：
 
 ```bash
 Who is Harry Potter? Harry Potter is a fictional character in a series of fantasy novels written by British author J.K. Rowling. The novels chronicle the lives of a young wizard, Harry Potter, and his friends Hermione Granger and Ron Weasley, all of whom are students at Hogwarts School of Witchcraft and Wizardry. The main story arc concerns Harry's struggle against Lord Voldemort, a dark wizard who intends to become immortal, overthrow the wizard governing body known as the Ministry of Magic and subjugate all wizards and
 ```
 
-Now, let's specify `logits_post_processor_name`  in our request:
+现在，在请求中指定 `logits_post_processor_name`：
 
 ```bash
 python3 /tutorials/AI_Agents_Guide/Constrained_Decoding/artifacts/client.py --prompt "Who is Harry Potter?" -o 100 --logits-post-processor-name "lmfe"
 ```
 
-This time, the expected response looks like:
+这次，预期的响应看起来像：
 ```bash
 Who is Harry Potter?
 		{
@@ -553,38 +470,35 @@ Who is Harry Potter?
 			"alive": "Yes"
 		}
 ```
-As we can see, the schema, defined in [`utils.py`](./artifacts/utils.py) is
-respected. Note, LM Format Enforcer lets LLM to control the order of generated
-fields, thus re-ordering of fields is allowed.
+可以看到，[`utils.py`](./artifacts/utils.py) 中定义的 schema 被严格遵守了。注意，LM Format Enforcer 允许 LLM 控制生成字段的顺序，因此字段可以重新排序。
 
-##### Option 2. Use [generate endpoint](https://github.com/triton-inference-server/tensorrtllm_backend/tree/release/0.5.0#query-the-server-with-the-triton-generate-endpoint).
+##### 方式 2：使用 [generate 端点](https://github.com/triton-inference-server/tensorrtllm_backend/tree/release/0.5.0#query-the-server-with-the-triton-generate-endpoint)
 
-Let's first send a standard request, without enforcing the JSON answer format:
+先发送一个不强制 JSON 回答格式的普通请求：
 ```bash
 curl -X POST localhost:8000/v2/models/ensemble/generate -d '{"text_input": "Who is Harry Potter?", "max_tokens": 100, "bad_words": "", "stop_words": "", "pad_id": 2, "end_id": 2}'
 ```
 
-You should expect the following response:
+你应该会收到类似下面的响应：
 
 ```bash
 {"context_logits":0.0,...,"text_output":"Who is Harry Potter? Harry Potter is a fictional character in a series of fantasy novels written by British author J.K. Rowling. The novels chronicle the lives of a young wizard, Harry Potter, and his friends Hermione Granger and Ron Weasley, all of whom are students at Hogwarts School of Witchcraft and Wizardry. The main story arc concerns Harry's struggle against Lord Voldemort, a dark wizard who intends to become immortal, overthrow the wizard governing body known as the Ministry of Magic and subjugate all wizards and"}
 ```
 
-Now, let's specify `logits_post_processor_name`  in our request:
+现在，在请求中指定 `logits_post_processor_name`：
 
 ```bash
 curl -X POST localhost:8000/v2/models/ensemble/generate -d '{"text_input": "Who is Harry Potter?", "max_tokens": 100, "bad_words": "", "stop_words": "", "pad_id": 2, "end_id": 2, "logits_post_processor_name": "lmfe"}'
 ```
 
-This time, the expected response looks like:
+这次，预期的响应看起来像：
 ```bash
 {"context_logits":0.0,...,"text_output":"Who is Harry Potter?  \t\t\t\n\t\t{\n\t\t\t\"name\": \"Harry Potter\",\n\t\t\t\"occupation\": \"Wizard\",\n\t\t\t\"house\": \"Gryffindor\",\n\t\t\t\"wand\": {\n\t\t\t\t\"wood\": \"Holly\",\n\t\t\t\t\"core\": \"Phoenix feather\",\n\t\t\t\t\"length\": 11\n\t\t\t},\n\t\t\t\"blood_status\": \"Pure-blood\",\n\t\t\t\"alive\": \"Yes\"\n\t\t}\n\n\t\t\n\n\n\n\t\t\n"}
 ```
 
 ### Outlines
 
-To use Outlines, make sure
-`inflight_batcher_llm/tensorrt_llm/1/model.py` contains the following changes:
+要使用 Outlines，请确保 `inflight_batcher_llm/tensorrt_llm/1/model.py` 包含以下修改：
 
 ```diff
 ...
@@ -632,9 +546,9 @@ class TritonPythonModel:
 ...
 ```
 
-#### Send an inference request
+#### 发送推理请求
 
-First, let's start Triton SDK container:
+首先，启动 Triton SDK 容器：
 ```bash
 # Using the SDK container as an example
 docker run --rm -it --net host --shm-size=2g \
@@ -644,60 +558,57 @@ docker run --rm -it --net host --shm-size=2g \
     nvcr.io/nvidia/tritonserver:<xx.yy>-py3-sdk
 ```
 
-The provided client script uses `pydantic` library, which we do not ship with
-the sdk container. Make sure to install it, before proceeding:
+提供的客户端脚本用到了 `pydantic` 库，SDK 容器中没有自带。继续之前请先安装：
 
 ```bash
 pip install pydantic
 ```
 
-##### Option 1. Use provided [client script](./artifacts/client.py)
+##### 方式 1：使用提供的[客户端脚本](./artifacts/client.py)
 
-Let's first send a standard request, without enforcing the JSON answer format:
+先发送一个不强制 JSON 回答格式的普通请求：
 ```bash
 python3 /tutorials/AI_Agents_Guide/Constrained_Decoding/artifacts/client.py --prompt "Who is Harry Potter?" -o 100
 ```
 
-You should expect the following response:
+你应该会收到类似下面的响应：
 
 ```bash
 Who is Harry Potter? Harry Potter is a fictional character in a series of fantasy novels written by British author J.K. Rowling. The novels chronicle the lives of a young wizard, Harry Potter, and his friends Hermione Granger and Ron Weasley, all of whom are students at Hogwarts School of Witchcraft and Wizardry. The main story arc concerns Harry's struggle against Lord Voldemort, a dark wizard who intends to become immortal, overthrow the wizard governing body known as the Ministry of Magic and subjugate all wizards and
 ```
 
-Now, let's specify `logits_post_processor_name`  in our request:
+现在，在请求中指定 `logits_post_processor_name`：
 
 ```bash
 python3 /tutorials/AI_Agents_Guide/Constrained_Decoding/artifacts/client.py --prompt "Who is Harry Potter?" -o 100 --logits-post-processor-name "outlines"
 ```
 
-This time, the expected response looks like:
+这次，预期的响应看起来像：
 ```bash
 Who is Harry Potter?{ "name": "Harry Potter","house": "Gryffindor","blood_status": "Pure-blood","occupation": "Wizards","alive": "No","wand": {"wood": "Holly","core": "Phoenix feather","length": 11 }}
 ```
-As we can see, the schema, defined in [`utils.py`](./artifacts/utils.py) is
-respected. Note, LM Format Enforcer lets LLM to control the order of generated
-fields, thus re-ordering of fields is allowed.
+可以看到，[`utils.py`](./artifacts/utils.py) 中定义的 schema 被严格遵守了。注意，LM Format Enforcer 允许 LLM 控制生成字段的顺序，因此字段可以重新排序。
 
-##### Option 2. Use [generate endpoint](https://github.com/triton-inference-server/tensorrtllm_backend/tree/release/0.5.0#query-the-server-with-the-triton-generate-endpoint).
+##### 方式 2：使用 [generate 端点](https://github.com/triton-inference-server/tensorrtllm_backend/tree/release/0.5.0#query-the-server-with-the-triton-generate-endpoint)
 
-Let's first send a standard request, without enforcing the JSON answer format:
+先发送一个不强制 JSON 回答格式的普通请求：
 ```bash
 curl -X POST localhost:8000/v2/models/ensemble/generate -d '{"text_input": "Who is Harry Potter?", "max_tokens": 100, "bad_words": "", "stop_words": "", "pad_id": 2, "end_id": 2}'
 ```
 
-You should expect the following response:
+你应该会收到类似下面的响应：
 
 ```bash
 {"context_logits":0.0,...,"text_output":"Who is Harry Potter? Harry Potter is a fictional character in a series of fantasy novels written by British author J.K. Rowling. The novels chronicle the lives of a young wizard, Harry Potter, and his friends Hermione Granger and Ron Weasley, all of whom are students at Hogwarts School of Witchcraft and Wizardry. The main story arc concerns Harry's struggle against Lord Voldemort, a dark wizard who intends to become immortal, overthrow the wizard governing body known as the Ministry of Magic and subjugate all wizards and"}
 ```
 
-Now, let's specify `logits_post_processor_name`  in our request:
+现在，在请求中指定 `logits_post_processor_name`：
 
 ```bash
 curl -X POST localhost:8000/v2/models/ensemble/generate -d '{"text_input": "Who is Harry Potter?", "max_tokens": 100, "bad_words": "", "stop_words": "", "pad_id": 2, "end_id": 2, "logits_post_processor_name": "outlines"}'
 ```
 
-This time, the expected response looks like:
+这次，预期的响应看起来像：
 ```bash
 {"context_logits":0.0,...,"text_output":"Who is Harry Potter?{ \"name\": \"Harry Potter\",\"house\": \"Gryffindor\",\"blood_status\": \"Pure-blood\",\"occupation\": \"Wizards\",\"alive\": \"No\",\"wand\": {\"wood\": \"Holly\",\"core\": \"Phoenix feather\",\"length\": 11 }}"}
 ```

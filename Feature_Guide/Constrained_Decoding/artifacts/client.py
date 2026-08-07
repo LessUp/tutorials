@@ -34,6 +34,7 @@ import tritonclient.grpc as grpcclient
 from pydantic import BaseModel
 
 
+# 用 pydantic 定义期望的 JSON 输出 schema，组装进提示词引导模型按此格式输出
 class AnswerFormat(BaseModel):
     title: str
     year: int
@@ -216,12 +217,14 @@ if __name__ == "__main__":
         FLAGS.embedding_bias_weights if FLAGS.embedding_bias_weights else None
     )
 
+    # 创建 gRPC 客户端（默认端口 8001），连接失败则退出
     try:
         client = grpcclient.InferenceServerClient(url=FLAGS.url)
     except Exception as e:
         print("client creation failed: " + str(e))
         sys.exit(1)
 
+    # 若请求返回 context/generation logits，构造对应的布尔输入张量
     return_context_logits_data = None
     if FLAGS.return_context_logits:
         return_context_logits_data = np.array(
@@ -236,11 +239,13 @@ if __name__ == "__main__":
 
     prompt = FLAGS.prompt
 
+    # 用 ChatML 模板组装提示词：--use-system-prompt 开启 JSON 模式
     if FLAGS.use_system_prompt:
         prompt = (
             "<|im_start|>system\n You are a helpful assistant that answers in JSON."
         )
 
+        # --use-schema 时把 pydantic schema 序列化为 JSON 注入提示词，约束输出字段
         if FLAGS.use_schema:
             prompt += "Here's the json schema you must adhere to:\n<schema>\n{schema}\n</schema>".format(
                 schema=AnswerFormat.model_json_schema()
@@ -250,6 +255,7 @@ if __name__ == "__main__":
             user_prompt=FLAGS.prompt
         )
 
+    # 发起推理；logits_post_processor_name 用于在服务端启用约束解码处理器（lmfe / outlines）
     output_text = client_utils.run_inference(
         client,
         prompt,
